@@ -106,6 +106,16 @@ fn main() -> ExitCode {
             cx.set_menus(lazy_ui::commands::native_menus());
         }
 
+        lazy_ui::commands::bind_app_shortcuts(cx);
+        cx.on_action(|_: &lazy_ui::commands::Quit, cx| cx.quit());
+        cx.on_action(|_: &lazy_ui::commands::CloseWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .ok();
+            }
+        });
+
         let placement = window_state::restore(
             saved_window.as_ref(),
             &window_state::display_rects(cx),
