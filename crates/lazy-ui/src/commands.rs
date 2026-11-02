@@ -36,6 +36,10 @@ pub enum CommandId {
     Threads,
     Saved,
     People,
+    /// The open conversation's pages and boards.
+    Docs,
+    /// The notes assigned to or written by the person.
+    NotesForMe,
     BrowseChannels,
     NewMessage,
     CreateChannel,
@@ -141,6 +145,13 @@ const REGISTRY: &[Command] = &[
     command(C::Threads, G::Go, "Threads", Some("secondary-shift-t")),
     command(C::Saved, G::Go, "Saved messages", Some("secondary-shift-s")),
     command(C::People, G::Go, "People", Some("secondary-shift-e")),
+    command(C::Docs, G::Go, "Docs", Some("secondary-shift-d")),
+    command(
+        C::NotesForMe,
+        G::Go,
+        "Notes for me",
+        Some("secondary-shift-n"),
+    ),
     command(
         C::BrowseChannels,
         G::Go,
@@ -376,6 +387,7 @@ pub enum MainView {
     Threads,
     Saved,
     People,
+    Docs,
 }
 
 /// Everything availability depends on, read once.

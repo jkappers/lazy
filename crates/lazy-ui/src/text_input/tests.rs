@@ -1150,3 +1150,364 @@ mod suggestions {
         assert!(second.left() > first.left() - gpui::px(1.));
     }
 }
+
+mod live_markdown {
+    use super::*;
+    use crate::text_input::live;
+
+    fn live() -> TextInputOptions {
+        TextInputOptions::new("Page")
+            .live_markdown(true)
+            .max_lines(4_000)
+            .max_bytes(1_000_000)
+    }
+
+    fn settle(cx: &mut VisualTestContext) {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// The text that is shaped and painted.
+    fn shown(input: &Entity<TextInput>, cx: &VisualTestContext) -> Option<String> {
+        input.read_with(cx, |i, _| {
+            i.layout
+                .borrow()
+                .as_ref()
+                .and_then(|l| l.display.as_ref().map(|d| d.text.clone()))
+        })
+    }
+
+    fn caret_at(input: &Entity<TextInput>, cx: &mut VisualTestContext, offset: usize) {
+        input.update(cx, |input, cx| input.set_selection(offset, offset, cx));
+        settle(cx);
+    }
+
+    fn row_heights(input: &Entity<TextInput>, cx: &VisualTestContext) -> Vec<Pixels> {
+        input.read_with(cx, |i, _| {
+            i.layout
+                .borrow()
+                .as_ref()
+                .map(|l| l.row_heights.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    fn body_height(input: &Entity<TextInput>, cx: &VisualTestContext) -> Pixels {
+        input.read_with(cx, |i, _| i.style.line_height)
+    }
+
+    #[gpui::test]
+    fn a_heading_is_large_and_loses_its_marker_when_the_caret_is_elsewhere(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("# Title\nbody", cx));
+        settle(cx);
+        assert_eq!(shown(&input, cx).as_deref(), Some("Title\nbody"));
+        let lh = body_height(&input, cx);
+        assert_eq!(row_heights(&input, cx), vec![lh * 2.0, lh]);
+
+        caret_at(&input, cx, 3);
+        assert_eq!(
+            shown(&input, cx).as_deref(),
+            Some("# Title\nbody"),
+            "the caret's line shows its marker"
+        );
+        let caret = input
+            .read_with(cx, |i, _| i.caret_bounds())
+            .expect("laid out");
+        assert_eq!(
+            caret.size.height,
+            lh * 2.0,
+            "the caret is as tall as the heading"
+        );
+    }
+
+    #[gpui::test]
+    fn the_input_is_as_tall_as_its_rows_and_hit_testing_follows_them(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("# Title\nbody\nmore", cx));
+        settle(cx);
+        let lh = body_height(&input, cx);
+        assert_eq!(area_height(&input, cx), lh * 4.0, "2 + 1 + 1 rows' worth");
+        input.read_with(cx, |i, _| {
+            let layout = i.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let display = layout.display.as_ref().unwrap();
+            assert_eq!(layout.rows[1].y, lh * 2.0);
+            let inside_heading = layout.offset_for_point(point(px(1.), lh * 2.0 - px(1.)));
+            assert!(inside_heading <= display.lines[0].len, "{inside_heading}");
+            let in_body = layout.offset_for_point(point(px(1.), lh * 2.0 + px(1.)));
+            assert_eq!(in_body, display.lines[1].start);
+            let last = layout.offset_for_point(point(px(1.), lh * 3.0 + px(1.)));
+            assert_eq!(last, display.lines[2].start);
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_text_after_hidden_markers_lands_on_the_right_model_offset(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("a **b** c\nnext", cx));
+        settle(cx);
+        assert_eq!(shown(&input, cx).as_deref(), Some("a b c\nnext"));
+        let rect = input.update_in(cx, |input, window, cx| {
+            let bounds = input
+                .layout
+                .borrow()
+                .as_ref()
+                .and_then(|l| l.bounds)
+                .unwrap();
+            // The bold "b" is byte 4 of the model text.
+            input.bounds_for_range(4..5, bounds, window, cx).unwrap()
+        });
+        let at = point(rect.origin.x + px(0.5), rect.origin.y + px(5.));
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        settle(cx);
+        assert_eq!(input.read_with(cx, |i, _| i.selection()), (4, 4));
+        assert_eq!(
+            shown(&input, cx).as_deref(),
+            Some("a **b** c\nnext"),
+            "the line the caret moved to shows its markers"
+        );
+    }
+
+    #[gpui::test]
+    fn selecting_everything_shows_the_source(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("# a\n**b**\n- c", cx));
+        settle(cx);
+        assert_eq!(shown(&input, cx).as_deref(), Some("a\nb\n- c"));
+        cx.simulate_keystrokes(&format!("{MODIFIER}-a"));
+        settle(cx);
+        assert_eq!(shown(&input, cx).as_deref(), Some("# a\n**b**\n- c"));
+    }
+
+    #[gpui::test]
+    fn composing_on_a_styled_line_keeps_its_syntax_and_reports_bounds(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("# Title\nbody", cx));
+        settle(cx);
+        caret_at(&input, cx, 3);
+        mark(&input, cx, "ni");
+        settle(cx);
+        assert!(input.read_with(cx, |i, _| i.is_composing()));
+        let lh = body_height(&input, cx);
+        let bounds = input
+            .read_with(cx, |i, _| i.layout.borrow().as_ref().and_then(|l| l.bounds))
+            .unwrap();
+        input.update_in(cx, |input, window, cx| {
+            let range = input.marked_range_utf16().expect("marked");
+            let candidate = input
+                .bounds_for_range(range, bounds, window, cx)
+                .expect("laid out");
+            assert_eq!(candidate.origin.y, bounds.origin.y, "on the heading's row");
+            assert_eq!(candidate.size.height, lh * 2.0);
+        });
+        assert_eq!(shown(&input, cx).as_deref(), Some("# Tniitle\nbody"));
+        // Committing leaves the text as typed.
+        cx.simulate_keystrokes("enter");
+        settle(cx);
+        assert_eq!(text(&input, cx), "# Tniitle\nbody");
+    }
+
+    #[gpui::test]
+    fn enter_continues_a_list_and_an_empty_item_ends_it(cx: &mut TestAppContext) {
+        let (input, events, cx) = setup(cx, live(), 400.);
+        cx.simulate_input("- one");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "- one\n- ");
+        cx.simulate_input("two");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "- one\n- two\n- ");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            text(&input, cx),
+            "- one\n- two\n",
+            "the empty item is removed"
+        );
+        assert!(
+            !take(&events).contains(&TextInputEvent::Submit),
+            "Enter never submits a page"
+        );
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            text(&input, cx),
+            "- one\n- two\n\n",
+            "then it is a plain break"
+        );
+    }
+
+    #[gpui::test]
+    fn enter_continues_numbers_tasks_and_quotes(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        cx.simulate_input("1. a");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("b");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "1. a\n2. b\n3. ");
+        input.update(cx, |input, cx| input.set_text("- [x] done", cx));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "- [x] done\n- [ ] ");
+        input.update(cx, |input, cx| input.set_text("> quote", cx));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "> quote\n> ");
+        input.update(cx, |input, cx| input.set_text("plain", cx));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "plain\n");
+    }
+
+    #[gpui::test]
+    fn a_continued_item_is_one_undo_step(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        cx.simulate_input("- one");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(text(&input, cx), "- one\n- ");
+        cx.simulate_keystrokes(&format!("{MODIFIER}-z"));
+        assert_eq!(text(&input, cx), "- one");
+        cx.simulate_keystrokes(&format!("shift-{MODIFIER}-z"));
+        assert_eq!(text(&input, cx), "- one\n- ");
+    }
+
+    #[gpui::test]
+    fn clicking_a_drawn_checkbox_toggles_it_and_undo_restores_it(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("- [ ] a\nb", cx));
+        settle(cx);
+        assert_eq!(shown(&input, cx).as_deref(), Some("☐ a\nb"));
+
+        let click_box = |cx: &mut VisualTestContext| {
+            let (origin, x, y) = input.read_with(cx, |i, _| {
+                let layout = i.layout.borrow();
+                let layout = layout.as_ref().unwrap();
+                let task = layout.display.as_ref().unwrap().lines[0]
+                    .task
+                    .clone()
+                    .unwrap();
+                (
+                    layout.bounds.unwrap().origin,
+                    layout.x_in_row(0, task.display.start),
+                    layout.rows[0].y,
+                )
+            });
+            let at = point(origin.x + x + px(1.), origin.y + y + px(4.));
+            cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+            cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+            settle(cx);
+        };
+        let caret = input.read_with(cx, |i, _| i.selection());
+        click_box(cx);
+        assert_eq!(text(&input, cx), "- [x] a\nb");
+        assert_eq!(
+            input.read_with(cx, |i, _| i.selection()),
+            caret,
+            "the caret stays"
+        );
+        assert_eq!(shown(&input, cx).as_deref(), Some("☑ a\nb"));
+        click_box(cx);
+        assert_eq!(text(&input, cx), "- [ ] a\nb");
+        click_box(cx);
+        cx.simulate_keystrokes(&format!("{MODIFIER}-z"));
+        assert_eq!(text(&input, cx), "- [ ] a\nb", "undo unticks it");
+    }
+
+    #[gpui::test]
+    fn clicking_beside_the_checkbox_places_the_caret_instead(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        input.update(cx, |input, cx| input.set_text("- [ ] abc\nb", cx));
+        settle(cx);
+        let rect = input.update_in(cx, |input, window, cx| {
+            let bounds = input
+                .layout
+                .borrow()
+                .as_ref()
+                .and_then(|l| l.bounds)
+                .unwrap();
+            input.bounds_for_range(8..9, bounds, window, cx).unwrap()
+        });
+        let at = point(rect.origin.x + px(0.5), rect.origin.y + px(4.));
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(text(&input, cx), "- [ ] abc\nb");
+        assert_eq!(input.read_with(cx, |i, _| i.selection()), (8, 8));
+    }
+
+    #[gpui::test]
+    fn formatting_shortcuts_are_on_without_asking(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        cx.simulate_input("word");
+        cx.simulate_keystrokes(&format!("{MODIFIER}-a"));
+        cx.simulate_keystrokes(&format!("{MODIFIER}-b"));
+        assert_eq!(text(&input, cx), "*word*");
+        settle(cx);
+        assert_eq!(
+            shown(&input, cx).as_deref(),
+            Some("*word*"),
+            "selected, so raw"
+        );
+    }
+
+    #[gpui::test]
+    fn an_empty_page_shows_its_placeholder_and_a_plain_input_is_unchanged(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        assert!(shown(&input, cx).is_none(), "nothing styled while empty");
+        let (plain, _events, cx2) = setup(cx, TextInputOptions::new("x").max_lines(50), 400.);
+        plain.update(cx2, |input, cx| input.set_text("# T\n**b**", cx));
+        settle(cx2);
+        assert!(shown(&plain, cx2).is_none(), "no styler, no display text");
+        let lh = body_height(&plain, cx2);
+        assert_eq!(row_heights(&plain, cx2), vec![lh, lh]);
+    }
+
+    #[gpui::test]
+    fn text_over_the_limit_is_plain(cx: &mut TestAppContext) {
+        let (input, _events, cx) = setup(cx, live(), 400.);
+        let big = format!("# a\n{}", "word ".repeat(live::LIVE_MAX_BYTES / 5));
+        input.update(cx, |input, cx| input.set_text(&big, cx));
+        settle(cx);
+        assert!(shown(&input, cx).is_none(), "too long to style");
+        let lh = body_height(&input, cx);
+        assert!(row_heights(&input, cx).iter().all(|h| *h == lh));
+        // Typing still works, and shrinking the text styles it again.
+        input.update(cx, |input, cx| input.set_text("# a\nb", cx));
+        settle(cx);
+        assert_eq!(shown(&input, cx).as_deref(), Some("a\nb"));
+    }
+
+    /// A timing probe, not a test: `cargo test -p lazy-ui --lib live_markdown::timing -- --ignored
+    /// --nocapture`. It uses the test platform's text system, so it measures this crate's work
+    /// (analysis, display text, layout bookkeeping) and not real glyph shaping.
+    #[gpui::test]
+    #[ignore = "timing probe"]
+    fn timing(cx: &mut TestAppContext) {
+        let line = "Some *words* with `code`, a [link](https://example.com) and **bold** text.\n";
+        for (label, lines) in [("about 190 KB styled", 2_500), ("about 1 MB plain", 13_500)] {
+            let text = line.repeat(lines);
+            let started = std::time::Instant::now();
+            let analyzed = live::analyze(&text);
+            let analysis = started.elapsed();
+            let started = std::time::Instant::now();
+            let display = live::build(&text, &analyzed, (0, 0));
+            let building = started.elapsed();
+            println!(
+                "{label}: {} KB, analyze {analysis:?}, build {building:?}, {} display bytes",
+                text.len() / 1000,
+                display.text.len()
+            );
+        }
+        let (input, _events, cx) = setup(cx, live(), 600.);
+        let text = line.repeat(2_500);
+        input.update(cx, |input, cx| input.set_text(&text, cx));
+        settle(cx);
+        for step in 0..3 {
+            let started = std::time::Instant::now();
+            input.update(cx, |input, cx| {
+                let end = input.text().len();
+                input.set_selection(end, end, cx);
+                input.set_text(&format!("{}{}", text, "x".repeat(step)), cx);
+            });
+            settle(cx);
+            println!("190 KB edit and relayout #{step}: {:?}", started.elapsed());
+        }
+    }
+}

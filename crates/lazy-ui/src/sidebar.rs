@@ -54,6 +54,8 @@ pub enum SidebarEvent {
     Saved,
     /// Open the people directory.
     People,
+    /// Open the docs: every page and board the person can read.
+    Docs,
     /// Open the quick switcher (the same as Ctrl+K).
     QuickSwitcher,
     /// Open the preferences dialog (the person's own row at the bottom).
@@ -78,6 +80,7 @@ enum NavKind {
     Threads,
     Saved,
     People,
+    Docs,
 }
 
 /// Everything one sidebar row shows, read from the core.
@@ -113,6 +116,9 @@ pub struct SidebarView {
     threads_focus: FocusHandle,
     saved_focus: FocusHandle,
     people_focus: FocusHandle,
+    docs_focus: FocusHandle,
+    /// The docs are showing (they live in the shell, not the core).
+    docs_open: bool,
     /// The person's own row at the bottom, which opens Preferences.
     prefs_focus: FocusHandle,
     menu: Option<Entity<Menu>>,
@@ -143,6 +149,8 @@ impl SidebarView {
             threads_focus: cx.focus_handle().tab_stop(true),
             saved_focus: cx.focus_handle().tab_stop(true),
             people_focus: cx.focus_handle().tab_stop(true),
+            docs_focus: cx.focus_handle().tab_stop(true),
+            docs_open: false,
             prefs_focus: cx.focus_handle().tab_stop(true),
             menu: None,
             _menu_subscription: None,
@@ -162,6 +170,19 @@ impl SidebarView {
     /// The focus handle of the People entry, for a view to return to.
     pub fn people_focus(&self) -> FocusHandle {
         self.people_focus.clone()
+    }
+
+    /// The focus handle of the Docs entry, for a view to return to.
+    pub fn docs_focus(&self) -> FocusHandle {
+        self.docs_focus.clone()
+    }
+
+    /// Marks the Docs entry as the open view (or not).
+    pub fn set_docs_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.docs_open != open {
+            self.docs_open = open;
+            cx.notify();
+        }
     }
 
     /// The focus handle of the quick switcher hint at the top.
@@ -430,11 +451,19 @@ impl SidebarView {
                 SidebarEvent::People,
                 "badge-people",
             ),
+            NavKind::Docs => (
+                "sidebar-docs",
+                "Docs",
+                "¶",
+                SidebarEvent::Docs,
+                "badge-docs",
+            ),
         };
         let focus = match kind {
             NavKind::Threads => self.threads_focus.clone(),
             NavKind::Saved => self.saved_focus.clone(),
             NavKind::People => self.people_focus.clone(),
+            NavKind::Docs => self.docs_focus.clone(),
         };
         div()
             .id(selector)
@@ -718,6 +747,8 @@ impl Render for SidebarView {
         list = list.child(self.nav_row(&theme, NavKind::Threads, inbox_open, inbox_unread, cx));
         list = list.child(self.nav_row(&theme, NavKind::Saved, saved_open, 0, cx));
         list = list.child(self.nav_row(&theme, NavKind::People, people_open, 0, cx));
+        let docs_open = self.docs_open;
+        list = list.child(self.nav_row(&theme, NavKind::Docs, docs_open, 0, cx));
 
         if !sections.favorites.is_empty() {
             list = list.child(self.section_header(&theme, "Favorites", None));

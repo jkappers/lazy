@@ -20,6 +20,12 @@ pub enum ReceiptKind {
     CreateChannel,
     OpenConversation,
     CreateGroup,
+    /// Docs (D30): making a page, changing one (edit, move, trash, restore, purge, restore a
+    /// version), making a notation, and changing one (edit, complete, reply, delete).
+    CreatePage,
+    ChangePage,
+    CreateNotation,
+    ChangeNotation,
 }
 
 impl ReceiptKind {
@@ -30,6 +36,10 @@ impl ReceiptKind {
             Self::CreateChannel => "create_channel",
             Self::OpenConversation => "open_conversation",
             Self::CreateGroup => "create_group",
+            Self::CreatePage => "create_page",
+            Self::ChangePage => "change_page",
+            Self::CreateNotation => "create_notation",
+            Self::ChangeNotation => "change_notation",
         }
     }
 }
@@ -40,6 +50,9 @@ pub enum ReceiptTarget {
     Message(MessageId),
     Conversation(ConversationId),
     Group(GroupId),
+    /// The page or notation a docs command is about. Not a foreign key: the receipt outlives a
+    /// purged page.
+    Docs(Uuid),
 }
 
 /// A stored receipt.
@@ -53,6 +66,8 @@ pub struct Receipt {
     pub conversation_id: Option<Uuid>,
     /// For creating a group. Not a foreign key: the receipt outlives the group.
     pub group_id: Option<Uuid>,
+    /// For a docs command: the page or notation it was about.
+    pub target_id: Option<Uuid>,
 }
 
 impl Receipt {
@@ -93,14 +108,15 @@ pub async fn claim(
     fingerprint: &[u8; 32],
     target: ReceiptTarget,
 ) -> Result<Option<Receipt>, AppError> {
-    let (message_id, conversation_id, group_id) = match target {
-        ReceiptTarget::Message(id) => (Some(id.as_uuid()), None, None),
-        ReceiptTarget::Conversation(id) => (None, Some(id.as_uuid()), None),
-        ReceiptTarget::Group(id) => (None, None, Some(id.as_uuid())),
+    let (message_id, conversation_id, group_id, target_id) = match target {
+        ReceiptTarget::Message(id) => (Some(id.as_uuid()), None, None, None),
+        ReceiptTarget::Conversation(id) => (None, Some(id.as_uuid()), None, None),
+        ReceiptTarget::Group(id) => (None, None, Some(id.as_uuid()), None),
+        ReceiptTarget::Docs(id) => (None, None, None, Some(id)),
     };
     let claimed = sqlx::query(
-        "INSERT INTO operation_receipts (user_id, operation_id, request_hash, kind, message_id, conversation_id, group_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (user_id, operation_id) DO NOTHING",
+        "INSERT INTO operation_receipts (user_id, operation_id, request_hash, kind, message_id, conversation_id, group_id, target_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (user_id, operation_id) DO NOTHING",
     )
     .bind(user.as_uuid())
     .bind(operation.as_uuid())
@@ -109,6 +125,7 @@ pub async fn claim(
     .bind(message_id)
     .bind(conversation_id)
     .bind(group_id)
+    .bind(target_id)
     .execute(&mut *conn)
     .await?
     .rows_affected()
@@ -129,7 +146,7 @@ pub async fn find(
     operation: OperationId,
 ) -> Result<Option<Receipt>, AppError> {
     let receipt = sqlx::query_as(
-        "SELECT kind, request_hash, message_id, message_revision, conversation_id, group_id FROM operation_receipts \
+        "SELECT kind, request_hash, message_id, message_revision, conversation_id, group_id, target_id FROM operation_receipts \
          WHERE user_id = $1 AND operation_id = $2",
     )
     .bind(user.as_uuid())

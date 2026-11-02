@@ -315,6 +315,23 @@ Goal: dogfood users can do normal work without developer assistance.
 - [ ] 3.9 Phase gate
   - [ ] Dogfood users complete normal work without developer assistance
   - [ ] Verification outcomes recorded
+- [ ] 3.10 Docs: pages, boards, versions, trash, notations (ported from Corpus; design in D30, `llm-docs/DOCS.md`)
+  - [X] Domain rules and wire types (`lazy-domain::page`, `lazy-domain::board`, `lazy-protocol`; `PROTOCOL_VERSION` 15)
+  - [X] Server: migration 0016, pages and boards, versions and restore, trash and purge, search, events
+  - [X] Server: notations with replies, assignee, completion, and the notation inbox
+  - [X] Server: files on pages through the attachment store
+  - [X] Client core and runtime: page list, open page, edit with base revision, history, trash, notations (pages are fetched on demand, not cached; only the journal is saved)
+  - [X] UI: Docs view (list, markdown editor with preview, board canvas, history, trash, notations pane, Notes for me); built and driven by tests, scenes looked at, and one two-client run against a real server
+  - [X] Looked at in `screens` scenes (10 of 15 looked at), and the page flow driven in `gui.rs`
+  - [ ] Verify on a real display: IME in the editor and title, screen reader names, scaling, the board canvas with a trackpad, and a long session (manual)
+  - [ ] Notes from the rendered preview, editing a note after writing it, and docs in the quick switcher and message search (not built)
+- [ ] 3.11 Programmatic access (ported from Corpus)
+  - [X] Personal access tokens with scopes; create, list, revoke
+  - [X] REST access to docs routes with a token; OpenAPI 3.1 document at `/v1/openapi.json`
+  - [X] MCP server at `/mcp` (11 tools; protocol revision 2026-07-28 and three older ones)
+  - [ ] A token management screen in the app (the client core has no inputs for tokens yet)
+  - [ ] OAuth for MCP clients that cannot use a token (deliberately not built: D31)
+  - [ ] Try `/mcp` with a real MCP client (only the server's own tests have called it)
 
 ---
 

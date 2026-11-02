@@ -5,11 +5,13 @@
 //! between the two.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     Bounds, Font, Hsla, LineLayout, Pixels, Point, SharedString, Size, WrappedLine, point, px, size,
 };
 
+use super::live::Display;
 use super::unicode::{prev_grapheme_boundary, snap_down};
 
 /// Width added to a selection that spans a line break, so the break is visible.
@@ -26,6 +28,8 @@ pub(crate) struct Row {
     pub end: usize,
     /// Top of the row in content coordinates.
     pub y: Pixels,
+    /// Height of the row. Every row of a logical line has the same height; headings are taller.
+    pub height: Pixels,
     /// Horizontal position of `start` within the unwrapped line.
     pub x_origin: Pixels,
     pub last_in_line: bool,
@@ -43,6 +47,28 @@ pub(crate) struct LayoutKey {
     pub placeholder_color: Hsla,
     pub placeholder: SharedString,
     pub masked: bool,
+    /// Present when the text is drawn as live markdown.
+    pub live: Option<LiveKey>,
+}
+
+/// The colors live markdown is drawn with, taken from the theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LiveColors {
+    pub dim: Hsla,
+    pub glyph: Hsla,
+    pub link: Hsla,
+    pub muted: Hsla,
+    pub code_surface: Hsla,
+    pub rule: Hsla,
+}
+
+/// What, beyond the text, decides how live markdown is shaped: which lines show their syntax, the
+/// composition underline, and the colors.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LiveKey {
+    pub active: (usize, usize),
+    pub marked: Option<Range<usize>>,
+    pub colors: LiveColors,
 }
 
 pub(crate) struct LayoutState {
@@ -52,7 +78,16 @@ pub(crate) struct LayoutState {
     /// Top of each logical line in content coordinates.
     pub line_tops: Vec<Pixels>,
     pub rows: Vec<Row>,
+    /// The body line height; styled lines scale it per line.
     pub line_height: Pixels,
+    /// Height of one row of each logical line.
+    pub row_heights: Vec<Pixels>,
+    /// For live markdown, the display text, its styles, and the offset map. Offsets in this
+    /// layout are offsets into `display.text`.
+    pub display: Option<Rc<Display>>,
+    /// A signature of how each logical line was shaped, so the next layout can take over lines
+    /// that did not change instead of shaping them again.
+    pub sigs: Vec<u64>,
     /// Size of all content, including rows scrolled out of view.
     pub content_size: Size<Pixels>,
     /// The model revision this layout was shaped for.
@@ -66,9 +101,11 @@ impl LayoutState {
     pub fn new(
         key: LayoutKey,
         lines: Vec<WrappedLine>,
+        row_heights: Vec<Pixels>,
         line_height: Pixels,
         showing_placeholder: bool,
     ) -> Self {
+        debug_assert_eq!(lines.len(), row_heights.len());
         let mut line_starts = Vec::with_capacity(lines.len());
         let mut line_tops = Vec::with_capacity(lines.len());
         let mut rows = Vec::new();
@@ -86,6 +123,7 @@ impl LayoutState {
                     line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
                 })
                 .collect();
+            let height = row_heights[line_ix];
             let mut row_start = 0;
             for (n, row_end) in boundaries.iter().copied().chain([line.len()]).enumerate() {
                 rows.push(Row {
@@ -93,10 +131,11 @@ impl LayoutState {
                     start: start + row_start,
                     end: start + row_end,
                     y,
+                    height,
                     x_origin: line.unwrapped_layout.x_for_index(row_start),
                     last_in_line: n == boundaries.len(),
                 });
-                y += line_height;
+                y += height;
                 row_start = row_end;
             }
             start += line.len() + 1;
@@ -109,6 +148,7 @@ impl LayoutState {
                 start: 0,
                 end: 0,
                 y: px(0.),
+                height: line_height,
                 x_origin: px(0.),
                 last_in_line: true,
             });
@@ -123,6 +163,9 @@ impl LayoutState {
             line_tops,
             rows,
             line_height,
+            row_heights,
+            display: None,
+            sigs: Vec::new(),
             content_size: size(width, y),
             revision,
             showing_placeholder,
@@ -152,6 +195,19 @@ impl LayoutState {
     pub fn point_for_offset(&self, offset: usize) -> Point<Pixels> {
         let row_ix = self.row_for_offset(offset);
         point(self.x_in_row(row_ix, offset), self.rows[row_ix].y)
+    }
+
+    /// Height of the row that contains `offset`: the caret's height there.
+    pub fn height_for_offset(&self, offset: usize) -> Pixels {
+        self.rows[self.row_for_offset(offset)].height
+    }
+
+    /// Bottom of logical line `line` in content coordinates.
+    pub fn line_bottom(&self, line: usize) -> Pixels {
+        self.line_tops
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.content_size.height)
     }
 
     /// The last offset of row `row_ix` at which the caret still displays on that row. For a
@@ -185,7 +241,7 @@ impl LayoutState {
     pub fn offset_for_point(&self, point: Point<Pixels>) -> usize {
         let row_ix = self
             .rows
-            .partition_point(|row| row.y + self.line_height <= point.y)
+            .partition_point(|row| row.y + row.height <= point.y)
             .min(self.rows.len() - 1);
         self.offset_in_row(row_ix, point.x)
     }
@@ -210,10 +266,7 @@ impl LayoutState {
             if covers_newline {
                 x1 += NEWLINE_HINT;
             }
-            rects.push(Bounds::new(
-                point(x0, row.y),
-                size(x1 - x0, self.line_height),
-            ));
+            rects.push(Bounds::new(point(x0, row.y), size(x1 - x0, row.height)));
         }
         rects
     }

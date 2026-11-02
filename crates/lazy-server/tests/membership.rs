@@ -399,6 +399,10 @@ fn crate_label(envelope: &lazy_protocol::EventEnvelope) -> &'static str {
         Event::MemberRoleChanged { .. } => "member_role_changed",
         Event::MemberDeactivated { .. } => "member_deactivated",
         Event::UserProfileChanged { .. } => "user_profile_changed",
+        Event::PageChanged { .. } => "page_changed",
+        Event::PageRemoved { .. } => "page_removed",
+        Event::NotationChanged { .. } => "notation_changed",
+        Event::NotationRemoved { .. } => "notation_removed",
     }
 }
 

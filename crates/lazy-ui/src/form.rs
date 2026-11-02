@@ -20,6 +20,9 @@ pub enum ButtonKind {
     Primary,
     Secondary,
     Danger,
+    /// Text with no border or fill until the pointer is over it, for the small actions of a
+    /// toolbar. Always compact.
+    Quiet,
 }
 
 /// A text button that is a tab stop. When `enabled` is false it looks inert and ignores clicks
@@ -31,6 +34,96 @@ pub fn button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
     kind: ButtonKind,
+    enabled: bool,
+    focus: &FocusHandle,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    build_button(
+        theme,
+        id,
+        label,
+        kind,
+        kind == ButtonKind::Quiet,
+        enabled,
+        focus,
+        on_activate,
+    )
+}
+
+/// [`button`] at toolbar size: the same kinds, with less padding and a smaller corner.
+pub fn compact_button(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+    focus: &FocusHandle,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    build_button(theme, id, label, kind, true, enabled, focus, on_activate)
+}
+
+/// A square button with a glyph in it and a tooltip, for the controls that a toolbar can say in
+/// one mark. `label` is the accessible name and the tooltip; it is a tab stop like every button.
+pub fn icon_button(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    glyph: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    focus: &FocusHandle,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.to_string();
+    let label: SharedString = label.into();
+    let tip = label.clone();
+    let colors = theme.colors;
+    let on_activate = Rc::new(on_activate);
+    let on_key = on_activate.clone();
+    let on_click = on_activate;
+    let focus_ring = colors.focus_ring;
+    div()
+        .id(ElementId::Name(id))
+        .debug_selector(move || selector)
+        .role(Role::Button)
+        .aria_label(label)
+        .track_focus(focus)
+        .flex_none()
+        .size(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(theme.radii.medium)
+        .border_1()
+        .border_color(transparent_black())
+        .text_size(theme.type_scale.body)
+        .focus_visible(move |style| style.border_color(focus_ring).border_2())
+        .tooltip(move |_, cx| crate::tooltip::TextTooltip::view(tip.clone(), cx))
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .text_color(colors.text_muted)
+                .hover(move |style| style.bg(colors.surface_hover).text_color(colors.text))
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if is_activation(event) {
+                        on_key(window, cx);
+                        cx.stop_propagation();
+                    }
+                })
+                .on_click(move |_, window, cx| on_click(window, cx))
+        })
+        .when(!enabled, |button| button.text_color(colors.text_faint))
+        .child(glyph.into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_button(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    compact: bool,
     enabled: bool,
     focus: &FocusHandle,
     on_activate: impl Fn(&mut Window, &mut App) + 'static,
@@ -64,20 +157,38 @@ pub fn button(
             colors.danger_surface,
             colors.danger,
         ),
+        // No fill and no edge until the pointer is over it.
+        ButtonKind::Quiet => (
+            transparent_black(),
+            colors.text_muted,
+            colors.surface_hover,
+            transparent_black(),
+        ),
     };
+    let quiet = kind == ButtonKind::Quiet;
     div()
         .id(ElementId::Name(id))
         .debug_selector(move || selector)
         .track_focus(focus)
         .flex_none()
-        .px_4()
-        .py_1p5()
-        // The brand's pill button.
-        .rounded(theme.radii.pill)
+        .when(compact, |button| {
+            button
+                .px_2p5()
+                .py_1()
+                .rounded(theme.radii.medium)
+                .font_weight(FontWeight::MEDIUM)
+        })
+        .when(!compact, |button| {
+            // The brand's pill button.
+            button
+                .px_4()
+                .py_1p5()
+                .rounded(theme.radii.pill)
+                .font_weight(FontWeight::SEMIBOLD)
+        })
         .border_1()
         .border_color(border)
         .text_size(theme.type_scale.body)
-        .font_weight(FontWeight::SEMIBOLD)
         .flex()
         .items_center()
         .justify_center()
@@ -87,7 +198,14 @@ pub fn button(
                 .cursor_pointer()
                 .bg(bg)
                 .text_color(fg)
-                .hover(move |style| style.bg(hover_bg))
+                .hover(move |style| {
+                    let style = style.bg(hover_bg);
+                    if quiet {
+                        style.text_color(colors.text)
+                    } else {
+                        style
+                    }
+                })
                 .on_key_down(move |event: &KeyDownEvent, window, cx| {
                     if is_activation(event) {
                         on_key(window, cx);
@@ -96,11 +214,14 @@ pub fn button(
                 })
                 .on_click(move |_, window, cx| on_click(window, cx))
         })
-        .when(!enabled, |button| {
+        .when(!enabled && !quiet, |button| {
             button
                 .bg(colors.surface_hover)
                 .text_color(colors.text_faint)
                 .border_color(colors.border)
+        })
+        .when(!enabled && quiet, |button| {
+            button.text_color(colors.text_faint)
         })
         .child(label.into())
 }

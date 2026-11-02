@@ -5,6 +5,9 @@
 //!
 //! * [`model`] and [`unicode`] are pure: text, selection, composition, undo, and UTF-8/UTF-16/
 //!   grapheme arithmetic.
+//! * [`live`] is also pure: it reads markdown line by line and builds the display text for
+//!   [`TextInputOptions::live_markdown`] (the docs page editor), with the map between that text
+//!   and the model's.
 //! * [`TextInput`] is the GPUI view: layout, painting, mouse and keyboard handling, and the
 //!   platform input handler.
 //!
@@ -18,6 +21,7 @@
 
 mod element;
 mod layout;
+pub mod live;
 pub mod model;
 mod style;
 pub mod unicode;

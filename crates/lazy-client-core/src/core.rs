@@ -32,6 +32,7 @@ mod attachments;
 mod conversations;
 mod diagnostics;
 mod discovery;
+mod docs;
 mod emoji;
 mod groups;
 mod inbox;
@@ -258,6 +259,7 @@ pub struct ClientCore {
 
     // ----- Search -----
     searching: search::Searching,
+    docs: docs::Docs,
 
     // ----- Discovery -----
     discovery: discovery::Discovery,
@@ -386,6 +388,7 @@ impl ClientCore {
             files: attachments::Files::default(),
             emojis: emoji::Emojis::default(),
             searching: search::Searching::default(),
+            docs: docs::Docs::default(),
             discovery: discovery::Discovery::default(),
             notif: notify::Notifications::default(),
             inboxing: inbox::Inboxing::default(),
@@ -939,6 +942,12 @@ impl ClientCore {
             | Input::CloseSearch
             | Input::OpenSearchHit(_)
             | Input::SearchResult { .. }) => self.search_input(input, &mut out),
+            Input::Docs(input) => self.docs_input(input, &mut out),
+            Input::DocsReply { id, result } => self.docs_reply(id, result, &mut out),
+            Input::DocsPersisted { operation } => self.docs_persisted(operation, &mut out),
+            Input::DocsPersistFailed { operation, reason } => {
+                self.docs_persist_failed(operation, reason, &mut out)
+            }
             input @ (Input::AddCustomEmoji { .. }
             | Input::RenameCustomEmoji { .. }
             | Input::DeleteCustomEmoji(_)
@@ -1074,6 +1083,7 @@ impl ClientCore {
         self.restore_recent_conversations(state.recent_conversations);
         self.recompute_shown_prefs();
         self.recovered_journal = state.journal;
+        self.docs_restore_journal(state.docs_journal);
         if !state.problems.is_empty() {
             self.note_error("storage", "startup_problem");
             self.set_notice(Some(state.problems.join(" ")), out);
@@ -1109,6 +1119,7 @@ impl ClientCore {
         self.thread_selections.clear();
         self.last_selected.clear();
         self.recovered_journal.clear();
+        self.docs_clear_journal();
         if self.emoji_prefs != EmojiPrefs::default() {
             self.emoji_prefs = EmojiPrefs::default();
             out.changes.push(Change::EmojiPrefsChanged);
@@ -1125,6 +1136,7 @@ impl ClientCore {
         self.selected = None;
         self.timelines.clear();
         self.ops.clear();
+        self.docs_reset();
         self.clear_files(out);
         self.sockets.clear();
         self.subscribed.clear();
@@ -1313,6 +1325,7 @@ impl ClientCore {
         self.recompute_connection(out);
 
         self.recover_journal(me, out);
+        self.docs_recover_journal(me, out);
         self.select_default(out);
 
         self.set_phase(SessionPhase::Ready, out);
@@ -1551,6 +1564,7 @@ impl ClientCore {
         // recovered submissions take their place at the front of the send queue before anything
         // typed from now on.
         self.recover_journal(me.id, out);
+        self.docs_recover_journal(me.id, out);
         self.select_default(out);
         self.set_phase(SessionPhase::Ready, out);
         self.request_bootstrap(out);
@@ -2484,6 +2498,20 @@ impl ClientCore {
             Event::GroupChanged { group } => self.apply_group_changed(group, out),
             Event::EmojiChanged { emoji } => self.apply_emoji_changed(emoji, out),
             Event::GroupDeleted { group_id } => self.apply_group_deleted(group_id, out),
+            Event::PageChanged { page, operation_id } => {
+                self.docs_page_changed(page, operation_id, out)
+            }
+            Event::PageRemoved { page_id, .. } => self.docs_page_removed(page_id, out),
+            Event::NotationChanged {
+                notation,
+                open_notations,
+            } => self.docs_notation_changed(notation, open_notations, out),
+            Event::NotationRemoved {
+                page_id,
+                notation_id,
+                open_notations,
+                ..
+            } => self.docs_notation_removed(page_id, notation_id, open_notations, out),
             Event::ReactionsChanged {
                 conversation_id,
                 message_id,
@@ -2514,7 +2542,12 @@ impl ClientCore {
             Event::MemberRemoved {
                 conversation_id,
                 user_id,
-            } => self.event_member_removed(conversation_id, user_id, out),
+            } => {
+                if self.me.as_ref().is_some_and(|me| me.id == user_id) {
+                    self.docs_conversation_lost(conversation_id, out);
+                }
+                self.event_member_removed(conversation_id, user_id, out)
+            }
             Event::UserStateChanged { state } => {
                 self.event_user_state_changed(state, envelope.seq, out)
             }

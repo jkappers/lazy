@@ -327,6 +327,8 @@ pub struct StartupState {
     pub session_restored: bool,
     /// Submissions that were journaled but never settled.
     pub journal: Vec<JournalEntry>,
+    /// Page creations and saves that were journaled but never settled (D30).
+    pub docs_journal: Vec<crate::docs::DocJournalEntry>,
     pub drafts: HashMap<ConversationId, String>,
     /// Reply composer texts saved for threads.
     pub thread_drafts: Vec<ThreadDraft>,

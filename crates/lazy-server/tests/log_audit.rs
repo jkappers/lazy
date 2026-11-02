@@ -19,6 +19,8 @@ const ALLOWED_FIELDS: &[&str] = &[
     "missed",
     "expired",
     "removed",
+    // how many trashed pages the retention job removed (a count, never a title)
+    "purged",
     "swept",
     "orphans",
     "stale_uploads",

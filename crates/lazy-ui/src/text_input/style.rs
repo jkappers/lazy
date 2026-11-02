@@ -112,6 +112,14 @@ pub struct TextInputOptions {
     ///
     /// [`TextInputEvent::PasteAttachments`]: super::TextInputEvent::PasteAttachments
     pub paste_attachments: bool,
+    /// Draws markdown as it is typed: headings large, `*bold*`, `` `code` ``, links, lists, tasks,
+    /// quotes, code blocks, and rules. The text stays the markdown source. On every line except
+    /// the ones the caret or selection touches, the syntax markers are hidden (`- ` becomes a
+    /// bullet). Enter continues a list, task, or quote (an empty item ends it), Enter always
+    /// inserts a line break instead of submitting, a click on a drawn checkbox toggles it, and
+    /// Ctrl/Cmd+B, I, and Shift+X wrap the selection. Multiline inputs only. Text over
+    /// [`live::LIVE_MAX_BYTES`](super::live::LIVE_MAX_BYTES) is shown as plain text.
+    pub live_markdown: bool,
 }
 
 impl TextInputOptions {
@@ -131,7 +139,15 @@ impl TextInputOptions {
             formatting_shortcuts: false,
             report_up_when_empty: false,
             paste_attachments: false,
+            live_markdown: false,
         }
+    }
+
+    /// Draws markdown as it is typed. See [`TextInputOptions::live_markdown`]. This is what the
+    /// docs page editor uses; it also turns on the formatting shortcuts.
+    pub fn live_markdown(mut self, enabled: bool) -> Self {
+        self.live_markdown = enabled;
+        self
     }
 
     pub fn accessible_label(mut self, label: impl Into<SharedString>) -> Self {

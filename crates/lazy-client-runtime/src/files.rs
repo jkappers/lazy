@@ -33,16 +33,20 @@ pub(crate) enum FileKind {
     Drafts,
     /// The regenerable content cache (see `lazy_client_core::ContentCache`).
     Cache,
+    /// Page creations and saves not yet settled (D30).
+    DocsJournal,
 }
 
 impl FileKind {
-    pub(crate) const ALL: [FileKind; 3] = [Self::Journal, Self::Drafts, Self::Cache];
+    pub(crate) const ALL: [FileKind; 4] =
+        [Self::Journal, Self::Drafts, Self::Cache, Self::DocsJournal];
 
     fn id(self) -> u8 {
         match self {
             Self::Journal => 1,
             Self::Drafts => 2,
             Self::Cache => 4,
+            Self::DocsJournal => 5,
         }
     }
 
@@ -51,6 +55,7 @@ impl FileKind {
             Self::Journal => "journal.enc",
             Self::Drafts => "drafts.enc",
             Self::Cache => "cache.enc",
+            Self::DocsJournal => "docs-journal.enc",
         }
     }
 
@@ -60,6 +65,8 @@ impl FileKind {
             Self::Journal => 16 * 1024 * 1024,
             Self::Drafts => 8 * 1024 * 1024,
             Self::Cache => lazy_client_core::MAX_CACHE_BYTES,
+            // A page body may be a megabyte and a few are journaled at a time.
+            Self::DocsJournal => 48 * 1024 * 1024,
         }
     }
 
@@ -68,6 +75,7 @@ impl FileKind {
             Self::Journal => "unsent-message journal",
             Self::Drafts => "drafts",
             Self::Cache => "content cache",
+            Self::DocsJournal => "unsaved-pages journal",
         }
     }
 }

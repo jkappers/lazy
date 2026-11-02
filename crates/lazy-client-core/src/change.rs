@@ -1,6 +1,6 @@
 //! Notifications describing what changed in the read model.
 
-use lazy_domain::{AttachmentId, ConversationId, EmojiId, MessageId, UserId};
+use lazy_domain::{AttachmentId, ConversationId, EmojiId, MessageId, PageId, UserId, WorkspaceId};
 
 use crate::{ActionKind, ComposerTarget, Effect};
 
@@ -167,6 +167,28 @@ pub enum Change {
     ServerChanged,
     /// `ClientCore::invitation_check()` changed.
     InvitationChanged,
+    /// `ClientCore::page_list` of this conversation changed (live or trash).
+    PageListChanged {
+        conversation: ConversationId,
+    },
+    /// `ClientCore::workspace_pages` of this workspace changed (live or trash).
+    WorkspacePagesChanged {
+        workspace: WorkspaceId,
+    },
+    /// `ClientCore::open_page` changed: it opened, closed, loaded, was edited, saved, hit a
+    /// conflict, or its versions or notations changed.
+    OpenPageChanged,
+    /// A page the host asked to create is ready (`ClientCore::create_state` is now `None`). Open
+    /// it, or leave it listed.
+    PageCreated {
+        page: PageId,
+    },
+    /// `ClientCore::page_search` changed.
+    PageSearchChanged,
+    /// `ClientCore::notation_inbox` changed.
+    NotationInboxChanged,
+    /// `ClientCore::docs_notice` or `ClientCore::recovered_edits` changed, or a create's state did.
+    DocsStateChanged,
 }
 
 /// Result of [`crate::ClientCore::handle`].

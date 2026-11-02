@@ -510,3 +510,41 @@ No `PROTOCOL_VERSION` change: two new routes, and a client falls back when a ser
 
 **Known gaps** are listed in `ONBOARDING.md` (a warning for plain `http://`, a show/hide button for the password, and a limit on how often a stranger may ask).
 
+
+## D30. Docs: pages, boards, versions, trash, notations (task 3.10)
+
+Ported from the Corpus project (`~/Projects/corpus`). `PROTOCOL_VERSION` is 15. The overview for readers is `DOCS.md`; this record holds what was decided and why.
+
+**What came over, and what it became.** Corpus has *spaces* holding *pages* and *boards*, with versions, trash, *notations* (notes anchored to text, with an assignee and replies), attachments, search, and an inbox. Lazy has no spaces, and a second membership system would duplicate the one it has. A page or board therefore **belongs to one conversation** and inherits its access: whoever can read the conversation reads its pages, whoever can post in it creates, edits, moves, trashes, restores, and purges them (`PageAccess::of(ChannelAccess)`). A private channel's pages are private; an archived channel's pages are read-only; leaving a channel removes its pages from view at once. Corpus's space roles (manager, editor, viewer) and visibility levels are not ported: a conversation's membership and visibility do that job. Corpus's per-user *personal space* becomes a direct message with oneself, which already exists.
+
+**Two kinds, equal.** `PageKind::Page` holds markdown (at most 1,000,000 bytes); `PageKind::Board` holds a `Board` (`lazy-domain::board`): shapes (rectangle, ellipse, diamond, note, text), connectors, and a viewport, at most 500 shapes and 1,000 connectors, whole-pixel coordinates and a whole-percent zoom so a board compares equal after a round trip. Corpus stores a React Flow document as free JSON; Lazy stores a typed value the server validates, because three clients (desktop, phone, API) must draw the same thing. A page refuses board content and the reverse. Only pages take notations (they anchor to text).
+
+**Revisions, not timestamps.** Corpus guards edits with `updated_at`; Lazy uses what it uses for messages: `revision` starts at 1, every change to title, content, or conversation adds one, and an edit names `base_revision`. A stale edit is `stale_revision`, the client fetches the page and offers *keep mine* or *take theirs*. There is no merge and no live co-editing; an autosave is one request in flight at a time. An edit that changes nothing commits nothing.
+
+**Versions.** Before an edit replaces the content, the earlier state is kept as a version if it differs from the newest version and, for an automatic snapshot, the newest is at least 5 minutes old (`should_snapshot`). A restore first keeps the current state as a `pre_restore` version (so it can be undone), then writes the old state as a new revision. 100 versions are kept per page, oldest dropped, numbers never reused. Corpus's "manual" snapshot reason is not ported.
+
+**Trash.** Trashing sets `trashed_at`; a trashed page is listed only in the trash and opened only through it. Anyone who can post may restore or purge. A job in the pruner removes pages trashed more than 30 days ago, with their files and notations. Purging a page that is not in the trash is `invalid_request`.
+
+**Notations.** Quote (at most 2,000 bytes), character range, body (at most 5,000), author, assignee (defaults to the author; must be able to read the page), completion with who completed it, replies. Author or assignee edit and complete; the author deletes; replies only while open; a reply's author deletes it. The range is where the quote was when the note was made; the client finds the quote again in the current text (`relocate_anchor`: same place, else nearest after, else nearest before, else *detached*). The server does not move anchors.
+
+**Ordering and events.** Every change runs under the workspace row lock like any event-producing write (D3), with an operation receipt, and appends an event to the conversation's members: `page_changed` (a summary, never content, so events stay small), `page_removed` (purged, or moved out of the conversation), `notation_changed` and `notation_removed` (both carry the page's new open-notation count). A client applies a summary only if its revision is newer, or the trash state differs at the same revision.
+
+**Search.** Pages and boards have a stored `tsvector` over title and text (`simple` configuration, like messages). Docs are searched with the page lists (`q`), per conversation or per workspace, filtered by read access at query time. The message search box does not return pages yet (a known gap).
+
+**Files.** A page's files go through the attachment store (D17) and its limits, are attached when uploaded (never pending, never expire), need post access to add and read access to download, and are removed with the page.
+
+**Not ported, on purpose.** Corpus's audit log (Lazy's administration has none, and the event log already records every change); its admin user management (Lazy has workspace administration, D22); personal accounts with email verification, two-factor, and passkeys (Lazy's sign-in is D2). The token, REST description, and MCP parts of Corpus are D31.
+
+**Known limits.** No live co-editing or merge. No offline editing of the same page from two devices without a conflict prompt. Board editing is shapes, connectors, text, and color; no freehand, images, or groups. Page text is plain markdown source in an editor with a rendered preview, not a rich-text editor.
+
+## D31. Programmatic access: tokens, an API description, and MCP (task 3.11)
+
+Ported from Corpus, where the web app is a client of the same REST API a script gets. Lazy's `/v1` routes were already that; what was missing is a credential that is not a person's session.
+
+**Personal access tokens.** A token is `lzp_` and 32 random bytes in URL-safe base64; the server stores only its SHA-256. It has a name, scopes, an optional expiry, and a last-used time. Scopes: `profile:read`, `pages:read`, `pages:write`, `notations:read`, `notations:write`, `conversations:read`, `mcp:use`. A token never does more than its owner (every route still checks the owner's access), and it reaches **only** the routes that name a scope: the docs routes, `GET /v1/me`, conversation lists, and `/mcp`. It cannot send messages, administer a workspace, or make tokens. Creating a token needs the password again, returns the secret once, and is limited to 25 per person; a deactivated person's tokens stop working with the session rules (D22). Corpus's `admin:*` scopes are not ported (no admin API).
+
+**OpenAPI.** `GET /v1/openapi.json` describes the token-reachable routes as OpenAPI 3.1, generated from a table in the server next to the routes so a route without an entry fails a test. Corpus serves a documentation UI; Lazy serves the document only.
+
+**MCP.** `POST /mcp` speaks JSON-RPC 2.0 (the Model Context Protocol's streamable HTTP transport, JSON responses only, no server-sent streams) for a bearer token holding `mcp:use`. Tools: `search`, `fetch`, `create_page`, `update_page` (takes `base_updated_at`-style `base_revision` and refuses stale writes), `trash`, `list_conversations`, `list_notations`, `add_notation`, `complete_notation`, `list_versions`, `restore_version`. Each calls the same module as the REST route.
+
+**Deviation from Corpus: no OAuth.** Corpus issues `mcp:use` only through OAuth with dynamic client registration. That needs a browser sign-in and consent page, and Lazy has no web surface (the client is a desktop app and the server speaks JSON). Here `mcp:use` is an ordinary token scope, created in the app. Clients that can only do OAuth cannot connect; the transport and tool surface are the same, so adding OAuth later changes only how a token is obtained.

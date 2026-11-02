@@ -10,6 +10,7 @@ pub mod channel_name;
 pub mod commands;
 pub mod composer;
 pub mod dialogs;
+pub mod docs;
 pub mod downloads;
 pub mod emoji_font;
 pub mod emoji_grid;

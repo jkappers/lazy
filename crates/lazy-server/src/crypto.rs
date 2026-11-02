@@ -131,6 +131,54 @@ pub fn new_session_token() -> Result<(SessionToken, [u8; 32]), AppError> {
     Ok((SessionToken::new(token), hash))
 }
 
+/// A new personal access token (D31): `lzp_` and 32 random bytes in URL-safe base64 without
+/// padding (43 characters), and the SHA-256 that is stored in its place. The prefix differs from
+/// a session token's, so the two can never be mistaken for each other and a secret scanner can
+/// recognise a leaked one.
+pub fn new_access_token() -> Result<(SessionToken, [u8; 32]), AppError> {
+    let mut random = [0u8; 32];
+    fill_random(&mut random)?;
+    let token = format!(
+        "{}{}",
+        lazy_protocol::docs::TOKEN_PREFIX,
+        base64_url(&random)
+    );
+    let hash = token_hash(&token);
+    Ok((SessionToken::new(token), hash))
+}
+
+/// The value stored for an access token. Returns `None` for text that cannot be one we issued, so
+/// the caller can skip the database.
+pub fn access_token_hash_if_wellformed(token: &str) -> Option<[u8; 32]> {
+    let random = token.strip_prefix(lazy_protocol::docs::TOKEN_PREFIX)?;
+    let wellformed = random.len() == 43
+        && random
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    wellformed.then(|| token_hash(token))
+}
+
+/// Whether text is shaped like an access token, whether or not it is a real one.
+pub fn looks_like_access_token(token: &str) -> bool {
+    token.starts_with(lazy_protocol::docs::TOKEN_PREFIX)
+}
+
+fn base64_url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, byte)| n | (u32::from(*byte) << (16 - 8 * i)));
+        let characters = chunk.len() + 1;
+        for i in 0..characters {
+            out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
 /// A new webhook secret: 256 random bits as 64 lowercase hex characters, and the SHA-256 hash that
 /// is stored in its place. The secret is shown once, in the webhook's address, and never kept.
 pub fn new_webhook_secret() -> Result<(String, [u8; 32]), AppError> {
@@ -308,6 +356,33 @@ mod tests {
         ] {
             assert_eq!(token_hash_if_wellformed(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn access_tokens_have_their_own_prefix_and_shape() {
+        let (a, a_hash) = new_access_token().unwrap();
+        let (b, _) = new_access_token().unwrap();
+        assert_ne!(a, b);
+        assert!(a.expose().starts_with("lzp_"));
+        assert_eq!(a.expose().len(), 4 + 43);
+        assert_eq!(access_token_hash_if_wellformed(a.expose()), Some(a_hash));
+        // A session token is never an access token, and the reverse.
+        let (session, _) = new_session_token().unwrap();
+        assert_eq!(access_token_hash_if_wellformed(session.expose()), None);
+        assert_eq!(token_hash_if_wellformed(a.expose()), None);
+        for bad in ["", "lzp_", "lzp_short", &format!("lzp_{}", "+".repeat(43))] {
+            assert_eq!(access_token_hash_if_wellformed(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn base64_url_matches_the_standard_vectors() {
+        assert_eq!(base64_url(b""), "");
+        assert_eq!(base64_url(b"f"), "Zg");
+        assert_eq!(base64_url(b"fo"), "Zm8");
+        assert_eq!(base64_url(b"foo"), "Zm9v");
+        assert_eq!(base64_url(b"foob"), "Zm9vYg");
+        assert_eq!(base64_url(&[0xfb, 0xff]), "-_8");
     }
 
     #[test]

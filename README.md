@@ -225,6 +225,8 @@ Phases 1 to 3 of the implementation plan are built: the MVP; channels, direct an
 
 The server, the client core and runtime, and the message-delivery guarantees are covered by automated tests, including fault injection (see [llm-docs/VERIFICATION.md](llm-docs/VERIFICATION.md)). The desktop client has been run and looked at on Linux. The macOS and Windows builds come from the same code but had never been run on those systems before this release, and input methods, screen readers, file dialogs, and different display scales have not been checked anywhere yet. The Docker setup is new and has had little use. Please report anything that looks or behaves wrong, with the report from **Menu, Help, Diagnostics…**.
 
+Docs (pages, boards, version history, trash, and notes anchored to text) are built from the Corpus project's docs features: open them from the **Docs** button in a conversation's header. Personal access tokens, an OpenAPI description at `/v1/openapi.json`, and an MCP server at `/mcp` let scripts and AI clients use them. See [llm-docs/DOCS.md](llm-docs/DOCS.md). They are new and have been tested but not used by people on real desktops yet.
+
 A tour of what each part of the app does, with what to try on a real desktop, is in [llm-docs/TOUR.md](llm-docs/TOUR.md). Known gaps are at the end of [llm-docs/VERIFICATION.md](llm-docs/VERIFICATION.md).
 
 ## Development

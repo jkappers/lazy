@@ -41,7 +41,7 @@ use futures_util::StreamExt;
 use lazy_domain::attachment::{
     MAX_ATTACHMENTS_PER_MESSAGE, is_previewable, resolve_media_type, sanitize_file_name,
 };
-use lazy_domain::{AttachmentId, ConversationId, UserId};
+use lazy_domain::{AttachmentId, ConversationId, PageId, UserId};
 use lazy_protocol::{Attachment, ErrorCode};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
@@ -126,6 +126,8 @@ struct AttachmentRow {
     has_thumbnail: bool,
     thumbnail_type: Option<String>,
     message_id: Option<Uuid>,
+    /// The page this file is on (a page file is attached from the moment it is uploaded).
+    page_id: Option<Uuid>,
     deleted_at: Option<OffsetDateTime>,
 }
 
@@ -133,7 +135,7 @@ macro_rules! attachment_select {
     ($tail:literal) => {
         concat!(
             "SELECT id, conversation_id, uploader_id, name, media_type, size, sha256, width, height, \
-                    has_thumbnail, thumbnail_type, message_id, deleted_at FROM attachments ",
+                    has_thumbnail, thumbnail_type, message_id, page_id, deleted_at FROM attachments ",
             $tail
         )
     };
@@ -226,7 +228,7 @@ pub(crate) fn declared_length(headers: &HeaderMap, max: u64) -> Result<u64, AppE
 async fn pending_of(conn: &mut PgConnection, user: Uuid) -> Result<(i64, i64), AppError> {
     Ok(sqlx::query_as(
         "SELECT count(*), COALESCE(sum(size), 0)::bigint FROM attachments \
-         WHERE uploader_id = $1 AND message_id IS NULL AND deleted_at IS NULL",
+         WHERE uploader_id = $1 AND message_id IS NULL AND page_id IS NULL AND deleted_at IS NULL",
     )
     .bind(user)
     .fetch_one(conn)
@@ -249,10 +251,12 @@ fn repeat_of(
     existing: &AttachmentRow,
     actor: UserId,
     conversation: ConversationId,
+    page: Option<PageId>,
     sha256: Option<&[u8; 32]>,
 ) -> Result<Attachment, AppError> {
     let same = existing.uploader_id == actor.as_uuid()
         && existing.conversation_id == conversation.as_uuid()
+        && existing.page_id == page.map(|page| page.as_uuid())
         && existing.deleted_at.is_none()
         && sha256.is_none_or(|hash| existing.sha256 == hash[..]);
     if same {
@@ -283,6 +287,53 @@ pub async fn upload(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Attachment, AppError> {
+    upload_to(state, actor, conversation, None, id, headers, body).await
+}
+
+/// Stores a file on a page (D30): the same pipeline and limits as [`upload`], but the file belongs
+/// to the page from the start, so it is never pending and never expires, and the page's members
+/// are told its file count changed. The caller must be able to post in the page's conversation, and
+/// the page must not be in the trash.
+pub async fn upload_page_file(
+    state: &AppState,
+    actor: UserId,
+    page: PageId,
+    id: AttachmentId,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Attachment, AppError> {
+    let mut conn = state.pool.acquire().await?;
+    let (row, loaded) = crate::pages::load_readable(&mut conn, actor, page).await?;
+    if !lazy_domain::PageAccess::of(&loaded.access()).can_edit() {
+        return Err(AppError::forbidden(
+            "you cannot change pages in this conversation",
+        ));
+    }
+    if row.trashed_at.is_some() {
+        return Err(AppError::not_found("page not found"));
+    }
+    drop(conn);
+    upload_to(
+        state,
+        actor,
+        ConversationId::from_uuid(row.conversation_id),
+        Some(page),
+        id,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn upload_to(
+    state: &AppState,
+    actor: UserId,
+    conversation: ConversationId,
+    page: Option<PageId>,
+    id: AttachmentId,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<Attachment, AppError> {
     let attachments = &state.attachments;
     let options = &attachments.options;
     let pool = &state.pool;
@@ -306,12 +357,15 @@ pub async fn upload(
 
     let existing = find(&mut conn, id.as_uuid()).await?;
     if let Some(existing) = &existing {
-        let attachment = repeat_of(existing, actor, conversation, None)?;
+        let attachment = repeat_of(existing, actor, conversation, page, None)?;
         if attachment.size != declared {
             return Err(AppError::conflict(
                 "that attachment id is already used for something else",
             ));
         }
+    } else if page.is_some() {
+        // A page file is not pending, so the pending limits do not apply (the page's own limit
+        // is checked when the row is written).
     } else {
         let (files, bytes) = pending_of(&mut conn, actor.as_uuid()).await?;
         if files >= MAX_PENDING_FILES || bytes + declared as i64 > MAX_PENDING_BYTES {
@@ -339,6 +393,7 @@ pub async fn upload(
     let upload = Upload {
         actor,
         conversation,
+        page,
         workspace,
         id,
         name,
@@ -356,6 +411,7 @@ pub async fn upload(
 struct Upload {
     actor: UserId,
     conversation: ConversationId,
+    page: Option<PageId>,
     workspace: lazy_domain::WorkspaceId,
     id: AttachmentId,
     name: String,
@@ -371,13 +427,14 @@ async fn finish_upload(
     let Upload {
         actor,
         conversation,
+        page,
         workspace,
         id,
         name,
         declared_type,
         declared,
     } = upload;
-    let (actor, conversation, id) = (*actor, *conversation, *id);
+    let (actor, conversation, id, page) = (*actor, *conversation, *id, *page);
     let attachments = &state.attachments;
     let pool = &state.pool;
     if staged.size != *declared {
@@ -388,7 +445,7 @@ async fn finish_upload(
 
     // Is this a repeat of an upload that already finished?
     if let Some(existing) = find(&mut *pool.acquire().await?, id.as_uuid()).await? {
-        return repeat_of(&existing, actor, conversation, Some(&staged.sha256));
+        return repeat_of(&existing, actor, conversation, page, Some(&staged.sha256));
     }
 
     let media_type = resolve_media_type(declared_type, &staged.prefix);
@@ -428,11 +485,38 @@ async fn finish_upload(
             .await?;
     }
     if let Some(existing) = find(&mut tx, id.as_uuid()).await? {
-        return repeat_of(&existing, actor, conversation, Some(&staged.sha256));
+        return repeat_of(&existing, actor, conversation, page, Some(&staged.sha256));
     }
-    let (files, bytes) = pending_of(&mut tx, actor.as_uuid()).await?;
-    if files >= MAX_PENDING_FILES || bytes + staged.size as i64 > MAX_PENDING_BYTES {
-        return Err(too_much_pending());
+    if let Some(page) = page {
+        // The page must still be live in this conversation, and has room; holding its row
+        // `FOR SHARE` keeps it from being purged or moved until this commits.
+        let live: Option<i64> = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM attachments a WHERE a.page_id = p.id AND a.deleted_at IS NULL) \
+             FROM pages p WHERE p.id = $1 AND p.conversation_id = $2 AND p.trashed_at IS NULL \
+             FOR SHARE OF p",
+        )
+        .bind(page.as_uuid())
+        .bind(conversation.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+        match live {
+            None => return Err(AppError::not_found("page not found")),
+            Some(files) if files >= crate::pages::MAX_FILES_PER_PAGE => {
+                return Err(AppError::new(
+                    ErrorCode::LimitReached,
+                    format!(
+                        "a page has at most {} files",
+                        crate::pages::MAX_FILES_PER_PAGE
+                    ),
+                ));
+            }
+            Some(_) => {}
+        }
+    } else {
+        let (files, bytes) = pending_of(&mut tx, actor.as_uuid()).await?;
+        if files >= MAX_PENDING_FILES || bytes + staged.size as i64 > MAX_PENDING_BYTES {
+            return Err(too_much_pending());
+        }
     }
 
     let key = ObjectKey::original(id.as_uuid());
@@ -457,8 +541,8 @@ async fn finish_upload(
         }
         sqlx::query(
             "INSERT INTO attachments (id, workspace_id, conversation_id, uploader_id, name, media_type, \
-                                      size, sha256, width, height, has_thumbnail, thumbnail_type) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                                      size, sha256, width, height, has_thumbnail, thumbnail_type, page_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(id.as_uuid())
         .bind(workspace.as_uuid())
@@ -472,8 +556,12 @@ async fn finish_upload(
         .bind(analysis.as_ref().map(|a| a.height as i32))
         .bind(analysis.is_some())
         .bind(analysis.as_ref().map(|a| a.thumbnail_type))
+        .bind(page.map(|page| page.as_uuid()))
         .execute(&mut *tx)
         .await?;
+        if let Some(page) = page {
+            crate::pages::announce_counts(&mut tx, page).await?;
+        }
         Ok::<(), AppError>(())
     }
     .await;
@@ -549,6 +637,7 @@ pub(crate) async fn claim_for_send(
             .filter(|row| {
                 row.uploader_id == sender.as_uuid()
                     && row.conversation_id == conversation.as_uuid()
+                    && row.page_id.is_none()
                     && row.deleted_at.is_none()
             })
             .ok_or_else(not_found)?;
@@ -608,6 +697,20 @@ pub(crate) async fn for_messages(
         }
     }
     Ok(grouped)
+}
+
+/// The files on a page, oldest first.
+pub(crate) async fn for_page(
+    conn: &mut PgConnection,
+    page: Uuid,
+) -> Result<Vec<Attachment>, AppError> {
+    let rows: Vec<AttachmentRow> = sqlx::query_as(attachment_select!(
+        "WHERE page_id = $1 AND deleted_at IS NULL ORDER BY created_at, id"
+    ))
+    .bind(page)
+    .fetch_all(conn)
+    .await?;
+    rows.iter().map(AttachmentRow::to_attachment).collect()
 }
 
 /// A message was deleted: its files can no longer be read. The bytes follow in the cleanup job.
@@ -687,6 +790,7 @@ pub async fn download(
     actor: UserId,
     id: AttachmentId,
     thumbnail: bool,
+    page_files_only: bool,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let pool = &state.pool;
@@ -695,8 +799,19 @@ pub async fn download(
     if row.deleted_at.is_some() {
         return Err(not_found());
     }
-    match row.message_id {
-        None => {
+    // An access token (D31) downloads files of pages only: its scope is `pages:read`, and a file
+    // of a message or a person's pending upload is not a page's.
+    if page_files_only && row.page_id.is_none() {
+        return Err(not_found());
+    }
+    match (row.message_id, row.page_id) {
+        (None, Some(page)) => {
+            // A page's file is readable by whoever can read the page.
+            crate::pages::load_readable(&mut conn, actor, PageId::from_uuid(page))
+                .await
+                .map_err(|_| not_found())?;
+        }
+        (None, None) => {
             if row.uploader_id != actor.as_uuid() {
                 return Err(not_found());
             }
@@ -710,7 +825,7 @@ pub async fn download(
             .filter(|loaded| loaded.facts.workspace_role.is_some())
             .ok_or_else(not_found)?;
         }
-        Some(_) => {
+        (Some(_), _) => {
             conversations::load(
                 &mut conn,
                 actor,
@@ -823,7 +938,7 @@ pub async fn cleanup(
         let marked = sqlx::query(
             "UPDATE attachments SET deleted_at = now() WHERE id IN ( \
                  SELECT id FROM attachments \
-                 WHERE message_id IS NULL AND deleted_at IS NULL \
+                 WHERE message_id IS NULL AND page_id IS NULL AND deleted_at IS NULL \
                    AND created_at < now() - make_interval(secs => $1) \
                  ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
         )
@@ -964,6 +1079,14 @@ pub fn spawn_jobs(
             (pool.clone(), Arc::clone(&attachments), shutdown.clone());
         tasks.spawn(async move {
             loop {
+                // Trash past its time goes first, so the same pass can remove its files.
+                match crate::pages::purge_expired(&pool, lazy_domain::page::TRASH_RETENTION_DAYS)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(purged) => tracing::info!(purged, "removed expired trashed pages"),
+                    Err(error) => tracing::warn!(error = %error.describe(), "trash purge failed; will retry"),
+                }
                 match cleanup(
                     &pool,
                     attachments.store.as_ref(),

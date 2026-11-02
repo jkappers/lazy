@@ -8,6 +8,9 @@
 //!
 //! The content shown is simulated and every scene is generated here, not read from a server.
 
+#[path = "docs_scenes/mod.rs"]
+mod docs_scenes;
+
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -9635,6 +9638,159 @@ fn main() {
             appearance: WindowAppearance::Light,
             build: &|model, cast, cx, rec, win| {
                 first_run_owner(cx, model, cast, rec, win, Upto::Done)
+            },
+        },
+        Scene {
+            name: "docs-01-list-light",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::List)
+            },
+        },
+        Scene {
+            name: "docs-02-list-dark",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Dark,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::List)
+            },
+        },
+        Scene {
+            name: "docs-03-empty-light",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Empty)
+            },
+        },
+        Scene {
+            name: "docs-04-trash-light",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Trash)
+            },
+        },
+        Scene {
+            name: "docs-05-page-light",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Page)
+            },
+        },
+        Scene {
+            name: "docs-06-page-menu-dark",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Dark,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::MoreMenu)
+            },
+        },
+        Scene {
+            name: "docs-07-conflict-light",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Conflict)
+            },
+        },
+        Scene {
+            name: "docs-08-board-light",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Board)
+            },
+        },
+        Scene {
+            name: "docs-09-board-dark",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Dark,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Board)
+            },
+        },
+        Scene {
+            name: "docs-10-board-editing-light",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::BoardEditing)
+            },
+        },
+        Scene {
+            name: "docs-11-history-light",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::History)
+            },
+        },
+        Scene {
+            name: "docs-12-notes-dark",
+            width: 1200.0,
+            height: 780.0,
+            appearance: WindowAppearance::Dark,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Notes)
+            },
+        },
+        Scene {
+            name: "docs-13-notes-screen-light",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::NotesScreen)
+            },
+        },
+        Scene {
+            name: "docs-14-list-narrow-light",
+            width: 640.0,
+            height: 480.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::List)
+            },
+        },
+        Scene {
+            name: "docs-15-page-narrow-dark",
+            width: 640.0,
+            height: 560.0,
+            appearance: WindowAppearance::Dark,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::Page)
+            },
+        },
+        Scene {
+            name: "docs-16-new-menu-light",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::NewMenu)
+            },
+        },
+        Scene {
+            name: "docs-17-place-menu-light",
+            width: 1100.0,
+            height: 720.0,
+            appearance: WindowAppearance::Light,
+            build: &|model, cast, cx, rec, win| {
+                docs_scenes::scene(cx, model, cast, rec, win, docs_scenes::Kind::PlaceMenu)
             },
         },
     ];

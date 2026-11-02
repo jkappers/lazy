@@ -91,6 +91,28 @@ uuid_id!(
     Uuid::now_v7()
 );
 uuid_id!(
+    /// A page or a board. Chosen by the creating client, so a retried creation is the same
+    /// creation.
+    PageId,
+    Uuid::now_v7()
+);
+uuid_id!(
+    /// A notation: a note anchored to text on a page. Chosen by the creating client.
+    NotationId,
+    Uuid::now_v7()
+);
+uuid_id!(
+    /// A reply under a notation. Chosen by the creating client.
+    NotationReplyId,
+    Uuid::now_v7()
+);
+uuid_id!(
+    /// A personal access token. Assigned by the server; it names the token, and the separate secret
+    /// is what a script sends.
+    AccessTokenId,
+    Uuid::now_v7()
+);
+uuid_id!(
     /// A message. Assigned by the server when the message is committed.
     MessageId,
     Uuid::now_v7()

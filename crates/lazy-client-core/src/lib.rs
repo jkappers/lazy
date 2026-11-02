@@ -10,11 +10,13 @@
 
 mod admin;
 mod attachments;
+pub mod board_edit;
 mod cache;
 mod change;
 mod core;
 mod diagnostics;
 mod discovery;
+mod docs;
 mod effect;
 mod effect_debug;
 mod input;
@@ -48,6 +50,11 @@ pub use diagnostics::{DiagnosticEvent, Diagnostics, MAX_DIAGNOSTIC_EVENTS, Works
 pub use discovery::{
     BrowseView, DIRECTORY_PAGE, MAX_RECENT_CONVERSATIONS, PeopleView, ProfileView,
     QUICK_SWITCHER_LIMIT, QuickSwitcherItem, QuickSwitcherTarget, SAVED_PAGE, SavedView,
+};
+pub use docs::{
+    ConflictChoice, CreateState, DOCS_PAGE, DocJournalAction, DocJournalEntry, DocsAnswer,
+    DocsCall, DocsEffect, DocsInput, DocsSearchView, MAX_DOC_RESENDS, NotationInboxView, OpenPage,
+    PageList, RecoveredEdit, SaveState, VersionsView,
 };
 pub use effect::Effect;
 pub use input::{Input, SocketEvent};

@@ -58,7 +58,11 @@ pub(crate) async fn workspace_has_no_members(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Principal {
     pub user_id: UserId,
+    /// The session, or for a request made with an access token (D31) the token's id.
     pub session_id: Uuid,
+    /// The request was authenticated by an access token, not a session. Such a request has already
+    /// passed the route table; a few handlers narrow further (a token downloads only page files).
+    pub via_token: bool,
 }
 
 /// Creates an account, joins it to the default workspace and its public channels, and signs it
@@ -331,6 +335,7 @@ pub async fn authenticate(pool: &PgPool, token: &str) -> Result<Principal, AppEr
     Ok(Principal {
         user_id: UserId::from_uuid(user_id),
         session_id,
+        via_token: false,
     })
 }
 

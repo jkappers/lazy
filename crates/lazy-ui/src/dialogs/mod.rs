@@ -13,9 +13,11 @@ mod diagnostics;
 mod groups;
 mod integrations;
 mod invitations;
+mod move_page;
 mod people;
 mod preferences;
 mod profile;
+mod purge_page;
 mod quick_switcher;
 mod shortcuts;
 mod updates;
@@ -34,9 +36,11 @@ pub use groups::GroupsDialog;
 pub use integrations::{IntegrationsEvent, IntegrationsSection};
 pub use invitations::InvitationsDialog;
 pub(crate) use invitations::shown_code;
+pub use move_page::MovePageDialog;
 pub use people::{PeopleDialog, PeopleMode};
 pub use preferences::PreferencesDialog;
 pub use profile::{ProfileDialog, ProfileRequest};
+pub use purge_page::PurgePageDialog;
 pub use quick_switcher::{
     QuickSwitcherChoice, QuickSwitcherDialog, QuickSwitcherRun,
     bind_keys as bind_quick_switcher_keys,

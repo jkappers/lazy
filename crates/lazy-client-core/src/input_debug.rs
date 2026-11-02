@@ -490,6 +490,21 @@ impl fmt::Debug for Input {
                 .finish(),
             Input::Socket(v0) => f.debug_tuple("Socket").field(v0).finish(),
             Input::Frame(v0) => f.debug_tuple("Frame").field(&Frame(v0)).finish(),
+            Input::Docs(v0) => f.debug_tuple("Docs").field(v0).finish(),
+            Input::DocsReply { id, result } => f
+                .debug_struct("DocsReply")
+                .field("id", id)
+                .field("result", &ResReq(result, "DocsAnswer"))
+                .finish(),
+            Input::DocsPersisted { operation } => f
+                .debug_struct("DocsPersisted")
+                .field("operation", operation)
+                .finish(),
+            Input::DocsPersistFailed { operation, reason } => f
+                .debug_struct("DocsPersistFailed")
+                .field("operation", operation)
+                .field("reason", &Text(reason))
+                .finish(),
             Input::StorageProblem(v0) => f.debug_tuple("StorageProblem").field(&Text(v0)).finish(),
             Input::ConversationCommandResult { operation, result } => f
                 .debug_struct("ConversationCommandResult")

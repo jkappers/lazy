@@ -41,6 +41,14 @@ fn about(event: &Event) -> Option<ConversationId> {
             conversation_id, ..
         } => Some(*conversation_id),
         Event::ThreadStateChanged { state } => Some(state.conversation_id),
+        Event::PageChanged { page, .. } => Some(page.conversation_id),
+        Event::NotationChanged { notation, .. } => Some(notation.conversation_id),
+        Event::PageRemoved {
+            conversation_id, ..
+        }
+        | Event::NotationRemoved {
+            conversation_id, ..
+        } => Some(*conversation_id),
         Event::MemberJoined { .. }
         | Event::GroupChanged { .. }
         | Event::GroupDeleted { .. }

@@ -278,6 +278,8 @@ fn name_of(dialog: &ShellDialog) -> &'static str {
         ShellDialog::Shortcuts => "shortcuts",
         ShellDialog::Diagnostics => "diagnostics",
         ShellDialog::Updates => "updates",
+        ShellDialog::PurgePage { .. } => "delete page for good",
+        ShellDialog::MovePage { .. } => "move page",
     }
 }
 
@@ -303,6 +305,14 @@ fn every_dialog(world: &World) -> Vec<ShellDialog> {
         ShellDialog::Shortcuts,
         ShellDialog::Diagnostics,
         ShellDialog::Updates,
+        ShellDialog::PurgePage {
+            page: lazy_domain::PageId::generate(),
+            title: "Launch plan".into(),
+        },
+        ShellDialog::MovePage {
+            page: lazy_domain::PageId::generate(),
+            from: world.general,
+        },
     ]
 }
 
@@ -321,12 +331,14 @@ const DIALOG_FILES: &[(&str, &str)] = &[
         "a section of ShellDialog::Details (its webhook forms are not dialogs of their own)",
     ),
     ("invitations", "ShellDialog::Invitations"),
+    ("move_page", "ShellDialog::MovePage"),
     (
         "people",
         "ShellDialog::NewMessage and ShellDialog::AddPeople",
     ),
     ("preferences", "ShellDialog::Preferences"),
     ("profile", "ShellDialog::Profile"),
+    ("purge_page", "ShellDialog::PurgePage"),
     ("quick_switcher", "ShellDialog::QuickSwitcher"),
     ("shortcuts", "ShellDialog::Shortcuts"),
     ("updates", "ShellDialog::Updates"),

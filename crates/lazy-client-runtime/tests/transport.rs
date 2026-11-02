@@ -463,6 +463,134 @@ async fn webhook_api(
     }
 }
 
+/// The docs routes of the stub (D30). It records each request and answers with a page, a list, or
+/// an empty success, or fails as the next `MessageBehavior` says.
+async fn docs_api(
+    State(s): State<Arc<Stub>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    s.record(uri.path(), &headers);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    s.calls.lock().unwrap().push(Call {
+        method: method.to_string(),
+        path: uri.path().to_owned(),
+        body: body.clone(),
+    });
+    let behavior = s
+        .message_plan
+        .lock()
+        .unwrap()
+        .pop_front()
+        .unwrap_or(MessageBehavior::Ok);
+    let refuse = |status: StatusCode, code: ErrorCode| {
+        (status, Json(ApiError::new(code, "no"))).into_response()
+    };
+    match behavior {
+        MessageBehavior::NotFound => return refuse(StatusCode::NOT_FOUND, ErrorCode::NotFound),
+        MessageBehavior::Forbidden => return refuse(StatusCode::FORBIDDEN, ErrorCode::Forbidden),
+        MessageBehavior::Stale => return refuse(StatusCode::CONFLICT, ErrorCode::StaleRevision),
+        MessageBehavior::ServerError => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        _ => {}
+    }
+    let path = uri.path();
+    let page_id = path
+        .split('/')
+        .find_map(|segment| segment.parse::<lazy_domain::PageId>().ok())
+        .unwrap_or_else(lazy_domain::PageId::generate);
+    let summary = lazy_protocol::PageSummary {
+        id: page_id,
+        workspace_id: s.workspace,
+        conversation_id: ConversationId::generate(),
+        kind: lazy_domain::page::PageKind::Page,
+        title: "Stub page".into(),
+        excerpt: String::new(),
+        created_by: s.user.id,
+        created_at: Timestamp::now(),
+        updated_by: s.user.id,
+        updated_at: Timestamp::now(),
+        revision: 1,
+        trashed_at: None,
+        purge_at: None,
+        open_notations: 0,
+        file_count: 0,
+    };
+    let detail = lazy_protocol::PageDetail {
+        summary: summary.clone(),
+        content: lazy_domain::page::PageContent::Page {
+            body: "hello".into(),
+        },
+        files: Vec::new(),
+    };
+    let notation = lazy_protocol::Notation {
+        id: lazy_domain::NotationId::generate(),
+        page_id,
+        conversation_id: summary.conversation_id,
+        author_id: s.user.id,
+        assignee_id: s.user.id,
+        quote: "q".into(),
+        from: 0,
+        to: 1,
+        body: "b".into(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
+        completed_at: None,
+        resolved_by: None,
+        replies: Vec::new(),
+    };
+    if path.contains("/files/") {
+        return Json(lazy_protocol::AttachmentResponse {
+            attachment: lazy_protocol::Attachment {
+                id: lazy_domain::AttachmentId::generate(),
+                name: "a.txt".into(),
+                media_type: "text/plain".into(),
+                size: 3,
+                sha256: "00".into(),
+                width: None,
+                height: None,
+                has_thumbnail: false,
+            },
+        })
+        .into_response();
+    }
+    if path.starts_with("/v1/notation-replies/") || path.starts_with("/v1/notations/") {
+        return if method == Method::DELETE && path.starts_with("/v1/notations/") {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            Json(lazy_protocol::NotationResponse { notation }).into_response()
+        };
+    }
+    if path.ends_with("/purge") {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if path.ends_with("/versions") {
+        return Json(lazy_protocol::PageVersionsResponse {
+            versions: Vec::new(),
+        })
+        .into_response();
+    }
+    if path.ends_with("/notations") {
+        return if method == Method::GET {
+            Json(lazy_protocol::NotationListResponse {
+                notations: vec![notation],
+            })
+            .into_response()
+        } else {
+            Json(lazy_protocol::NotationResponse { notation }).into_response()
+        };
+    }
+    if path.ends_with("/pages") && method == Method::GET {
+        return Json(lazy_protocol::PageListResponse {
+            pages: vec![summary],
+            has_more: false,
+        })
+        .into_response();
+    }
+    Json(lazy_protocol::PageResponse { page: detail }).into_response()
+}
+
 /// A code the stub's invitations carry. It must never appear in anything the runtime prints.
 const STUB_INVITE_CODE: &str = "stub-invite-code-0123456789ab";
 
@@ -1192,6 +1320,35 @@ fn router(stub: Arc<Stub>) -> Router {
         .route(
             "/v1/workspaces/{workspace_id}/inbox/read",
             axum::routing::post(notify_api),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/pages",
+            get(docs_api).post(docs_api),
+        )
+        .route(
+            "/v1/pages/{page_id}",
+            get(docs_api).patch(docs_api).delete(docs_api),
+        )
+        .route("/v1/workspaces/{workspace_id}/pages", get(docs_api))
+        .route("/v1/workspaces/{workspace_id}/notations", get(docs_api))
+        .route("/v1/pages/{page_id}/restore", post(docs_api))
+        .route("/v1/pages/{page_id}/purge", post(docs_api))
+        .route("/v1/pages/{page_id}/versions", get(docs_api))
+        .route(
+            "/v1/pages/{page_id}/notations",
+            get(docs_api).post(docs_api),
+        )
+        .route(
+            "/v1/pages/{page_id}/files/{attachment_id}",
+            axum::routing::put(docs_api),
+        )
+        .route(
+            "/v1/notations/{notation_id}",
+            axum::routing::patch(docs_api).delete(docs_api),
+        )
+        .route(
+            "/v1/notation-replies/{reply_id}",
+            axum::routing::delete(docs_api),
         )
         .route("/v1/messages/{message_id}/replies", get(thread_api))
         .route(
@@ -6301,4 +6458,351 @@ fn what_is_saved_after_signing_out_and_in_again_is_still_readable_after_a_restar
         Some("after")
     );
     client.shutdown();
+}
+
+// ----- Docs (D30) -----
+
+fn docs_request(
+    client: &mut Client,
+    server: &Server,
+    id: u64,
+    call: lazy_client_core::DocsCall,
+) -> (Result<lazy_client_core::DocsAnswer, RequestError>, Call) {
+    let (input, call) = run_effect(
+        client,
+        server,
+        Effect::Docs(lazy_client_core::DocsEffect::Request { id, call }),
+        move |i| matches!(i, Input::DocsReply { id: got, .. } if *got == id),
+    );
+    let Input::DocsReply { result, .. } = input else {
+        unreachable!()
+    };
+    (result, call)
+}
+
+#[test]
+fn every_docs_request_uses_its_documented_route_method_and_body() {
+    use lazy_client_core::{DocsAnswer, DocsCall};
+    use lazy_domain::page::{PageContent, PageKind};
+    use lazy_domain::{NotationId, NotationReplyId, PageId};
+    use lazy_protocol::*;
+    let server = Server::start();
+    let (mut client, _) = Client::start(&server);
+    client.login();
+    let (conversation, workspace) = (ConversationId::generate(), server.stub.workspace);
+    let page = PageId::generate();
+    let notation = NotationId::generate();
+    let reply = NotationReplyId::generate();
+    let op = OperationId::generate;
+    let action = || PageActionRequest { operation_id: op() };
+    let n_action = || NotationActionRequest { operation_id: op() };
+    let cases: Vec<(DocsCall, &str, String)> = vec![
+        (
+            DocsCall::ListPages {
+                conversation,
+                params: PageListParams::default(),
+            },
+            "GET",
+            format!("/v1/conversations/{conversation}/pages"),
+        ),
+        (DocsCall::GetPage(page), "GET", format!("/v1/pages/{page}")),
+        (
+            DocsCall::CreatePage {
+                conversation,
+                request: CreatePageRequest {
+                    operation_id: op(),
+                    page_id: page,
+                    kind: PageKind::Page,
+                    title: "T".into(),
+                    content: None,
+                },
+            },
+            "POST",
+            format!("/v1/conversations/{conversation}/pages"),
+        ),
+        (
+            DocsCall::UpdatePage {
+                page,
+                request: UpdatePageRequest {
+                    operation_id: op(),
+                    base_revision: 1,
+                    title: None,
+                    content: Some(PageContent::Page { body: "x".into() }),
+                    append: None,
+                    conversation_id: None,
+                },
+            },
+            "PATCH",
+            format!("/v1/pages/{page}"),
+        ),
+        (
+            DocsCall::TrashPage {
+                page,
+                request: action(),
+            },
+            "DELETE",
+            format!("/v1/pages/{page}"),
+        ),
+        (
+            DocsCall::RestorePage {
+                page,
+                request: action(),
+            },
+            "POST",
+            format!("/v1/pages/{page}/restore"),
+        ),
+        (
+            DocsCall::PurgePage {
+                page,
+                request: action(),
+            },
+            "POST",
+            format!("/v1/pages/{page}/purge"),
+        ),
+        (
+            DocsCall::ListVersions(page),
+            "GET",
+            format!("/v1/pages/{page}/versions"),
+        ),
+        (
+            DocsCall::ListNotations(page),
+            "GET",
+            format!("/v1/pages/{page}/notations"),
+        ),
+        (
+            DocsCall::CreateNotation {
+                page,
+                request: CreateNotationRequest {
+                    operation_id: op(),
+                    notation_id: notation,
+                    quote: "q".into(),
+                    from: 0,
+                    to: 1,
+                    body: "b".into(),
+                    assignee_id: None,
+                },
+            },
+            "POST",
+            format!("/v1/pages/{page}/notations"),
+        ),
+        (
+            DocsCall::UpdateNotation {
+                notation,
+                request: UpdateNotationRequest {
+                    operation_id: op(),
+                    body: Some("c".into()),
+                    assignee_id: None,
+                },
+            },
+            "PATCH",
+            format!("/v1/notations/{notation}"),
+        ),
+        (
+            DocsCall::DeleteNotation {
+                notation,
+                request: n_action(),
+            },
+            "DELETE",
+            format!("/v1/notations/{notation}"),
+        ),
+        (
+            DocsCall::DeleteNotationReply {
+                reply,
+                request: n_action(),
+            },
+            "DELETE",
+            format!("/v1/notation-replies/{reply}"),
+        ),
+    ];
+    for (n, (call, method, path)) in cases.into_iter().enumerate() {
+        let (result, seen) = docs_request(&mut client, &server, n as u64 + 1, call);
+        assert!(result.is_ok(), "{method} {path}: {result:?}");
+        assert_eq!(
+            (seen.method.as_str(), seen.path.as_str()),
+            (method, path.as_str())
+        );
+        // A request with a body sends the operation id.
+        if method != "GET" {
+            assert!(
+                seen.body.get("operation_id").is_some(),
+                "{method} {path} sends its operation id: {}",
+                seen.body
+            );
+        }
+    }
+    // The answers have the right shapes.
+    let (result, _) = docs_request(
+        &mut client,
+        &server,
+        100,
+        DocsCall::ListWorkspacePages {
+            workspace,
+            params: PageListParams {
+                q: Some("road map".into()),
+                ..PageListParams::default()
+            },
+        },
+    );
+    assert!(matches!(result, Ok(DocsAnswer::Pages(_))));
+    let (result, seen) = docs_request(
+        &mut client,
+        &server,
+        102,
+        DocsCall::ListWorkspaceNotations {
+            workspace,
+            params: NotationListParams::default(),
+        },
+    );
+    assert!(matches!(result, Ok(DocsAnswer::Notations(_))));
+    assert_eq!(seen.path, format!("/v1/workspaces/{workspace}/notations"));
+    let (result, _) = docs_request(&mut client, &server, 101, DocsCall::GetPage(page));
+    assert!(matches!(result, Ok(DocsAnswer::Page(_))));
+    client.shutdown();
+}
+
+#[test]
+fn a_docs_read_is_repeated_but_a_docs_mutation_is_one_attempt() {
+    use lazy_client_core::DocsCall;
+    use lazy_domain::PageId;
+    use lazy_protocol::PageActionRequest;
+    let server = Server::start();
+    let (mut client, _) = Client::start(&server);
+    client.login();
+    let page = PageId::generate();
+    server
+        .stub
+        .message_plan
+        .lock()
+        .unwrap()
+        .push_back(MessageBehavior::ServerError);
+    let before = call_count(&server);
+    let (result, _) = docs_request(&mut client, &server, 1, DocsCall::GetPage(page));
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(call_count(&server), before + 2, "one failure, one retry");
+
+    server
+        .stub
+        .message_plan
+        .lock()
+        .unwrap()
+        .push_back(MessageBehavior::ServerError);
+    let before = call_count(&server);
+    let (result, _) = docs_request(
+        &mut client,
+        &server,
+        2,
+        DocsCall::TrashPage {
+            page,
+            request: PageActionRequest {
+                operation_id: OperationId::generate(),
+            },
+        },
+    );
+    assert!(matches!(result, Err(RequestError::Unknown(_))));
+    assert_eq!(
+        call_count(&server),
+        before + 1,
+        "a mutation is not repeated by the runtime"
+    );
+
+    // A refusal is a refusal, with its code.
+    for (behavior, code) in [
+        (MessageBehavior::Stale, ErrorCode::StaleRevision),
+        (MessageBehavior::Forbidden, ErrorCode::Forbidden),
+        (MessageBehavior::NotFound, ErrorCode::NotFound),
+    ] {
+        server.stub.message_plan.lock().unwrap().push_back(behavior);
+        let (result, _) = docs_request(&mut client, &server, 3, DocsCall::GetPage(page));
+        assert!(matches!(result, Err(RequestError::Rejected(e)) if e.code == code));
+    }
+    client.shutdown();
+}
+
+#[test]
+fn a_page_file_is_uploaded_with_its_name_and_the_answer_is_the_attachment() {
+    use lazy_client_core::{DocsAnswer, DocsCall, FileBytes};
+    use lazy_domain::{AttachmentId, PageId};
+    let server = Server::start();
+    let (mut client, _) = Client::start(&server);
+    client.login();
+    let (page, attachment) = (PageId::generate(), AttachmentId::generate());
+    let (result, seen) = docs_request(
+        &mut client,
+        &server,
+        1,
+        DocsCall::UploadPageFile {
+            page,
+            attachment,
+            source: FileSource::Bytes(FileBytes::new(b"abc".to_vec())),
+        },
+    );
+    assert!(matches!(result, Ok(DocsAnswer::File(_))), "{result:?}");
+    assert_eq!(
+        (seen.method.as_str(), seen.path.as_str()),
+        (
+            "PUT",
+            format!("/v1/pages/{page}/files/{attachment}").as_str()
+        )
+    );
+    client.shutdown();
+}
+
+#[test]
+fn a_docs_journal_entry_is_acknowledged_only_after_it_is_durable_and_survives_a_restart() {
+    use lazy_client_core::{DocJournalAction, DocJournalEntry, DocsEffect};
+    use lazy_domain::PageId;
+    let server = Server::start();
+    let (mut client, _) = Client::start(&server);
+    let request = lazy_protocol::CreatePageRequest {
+        operation_id: OperationId::generate(),
+        page_id: PageId::generate(),
+        kind: lazy_domain::page::PageKind::Page,
+        title: "Draft".into(),
+        content: None,
+    };
+    let entry = DocJournalEntry {
+        operation_id: request.operation_id,
+        user_id: server.stub.user.id,
+        submitted_at: Timestamp::now(),
+        action: DocJournalAction::Create {
+            conversation: ConversationId::generate(),
+            request,
+        },
+    };
+    client.execute(vec![Effect::Docs(DocsEffect::Persist(entry.clone()))]);
+    client.expect(
+        "persisted",
+        |i| matches!(i, Input::DocsPersisted { operation } if *operation == entry.operation_id),
+    );
+    let key = client.vault().state_key().unwrap();
+    assert_eq!(
+        inspect_state(client.profile.path(), &key).docs_journal,
+        vec![entry.clone()],
+        "the entry is readable the moment it is acknowledged"
+    );
+    // The same entry again is a no-op.
+    client.execute(vec![Effect::Docs(DocsEffect::Persist(entry.clone()))]);
+    client.expect("persisted again", |i| {
+        matches!(i, Input::DocsPersisted { .. })
+    });
+    assert_eq!(
+        inspect_state(client.profile.path(), &key)
+            .docs_journal
+            .len(),
+        1
+    );
+
+    // A restart hands it back to the core.
+    let (mut client, started) = client.restart(&server);
+    assert_eq!(started_state(started).docs_journal, vec![entry.clone()]);
+
+    client.execute(vec![Effect::Docs(DocsEffect::Settle {
+        operation: entry.operation_id,
+    })]);
+    client.shutdown();
+    assert!(
+        inspect_state(client.profile.path(), &key)
+            .docs_journal
+            .is_empty()
+    );
 }

@@ -127,15 +127,17 @@
 //! `GET /v1/messages/{id}` to learn the message's conversation and position.
 
 pub mod api;
+pub mod docs;
 pub mod error;
 pub mod realtime;
 pub mod secret;
 
 pub use api::*;
+pub use docs::*;
 pub use error::{ApiError, ErrorCode};
 pub use realtime::{ClientFrame, Event, EventEnvelope, ServerFrame, SnapshotReason};
 pub use secret::{InviteCode, Password, SessionToken};
 
 /// Version of this protocol. Bumped for incompatible changes; clients compare it with the value
 /// returned by `GET /v1/bootstrap` and `GET /healthz`.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;

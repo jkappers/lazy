@@ -49,6 +49,7 @@ use crate::secure::{
 };
 use crate::store::{StateStore, StoreError};
 
+mod docs;
 mod transfer;
 use transfer::{FileServices, Transfers};
 
@@ -660,6 +661,7 @@ impl Inner {
                     self.cancel.clone(),
                 ));
                 state.journal = recovered.journal;
+                state.docs_journal = recovered.docs_journal;
                 state.drafts = recovered.drafts;
                 state.thread_drafts = recovered.thread_drafts;
                 state.view = recovered.view;
@@ -1320,6 +1322,7 @@ impl Inner {
                 params,
             } => self.search(workspace, generation, params),
             Effect::CancelSearch => self.cancel_search(),
+            Effect::Docs(effect) => self.docs_effect(effect),
             Effect::SetNotificationSettings {
                 workspace,
                 settings,
@@ -1756,6 +1759,34 @@ impl Inner {
         }
     }
 
+    /// Docs work (D30): a request, or the journal of creates and saves.
+    fn docs_effect(self: &Arc<Self>, effect: lazy_client_core::DocsEffect) {
+        use lazy_client_core::DocsEffect;
+        match effect {
+            DocsEffect::Request { id, call } => self.docs_request(id, call),
+            DocsEffect::Persist(entry) => {
+                let operation = entry.operation_id;
+                match self.persistence() {
+                    Some(persistence) => persistence.docs_submit(entry),
+                    None => {
+                        let inner = self.clone();
+                        self.spawn(async move {
+                            let reason = "local storage is unavailable".to_owned();
+                            inner
+                                .emit(Input::DocsPersistFailed { operation, reason })
+                                .await;
+                        });
+                    }
+                }
+            }
+            DocsEffect::Settle { operation } => {
+                if let Some(persistence) = self.persistence() {
+                    persistence.docs_settle(operation);
+                }
+            }
+        }
+    }
+
     /// Repeats a read that is safe to repeat, with backoff, until it succeeds, is rejected, or
     /// attempts run out.
     async fn retry_read<T, F, Fut>(&self, mut call: F) -> Result<T, RequestError>
@@ -1991,6 +2022,8 @@ impl SecureStorage for UnavailableStorage {
 enum JournalCommand {
     Submit(JournalEntry),
     Settle(OperationId),
+    DocsSubmit(lazy_client_core::DocJournalEntry),
+    DocsSettle(OperationId),
     DiscardCache,
     Wipe(oneshot::Sender<()>),
 }
@@ -2057,6 +2090,20 @@ impl Persistence {
         self.send(JournalCommand::Settle(operation));
     }
 
+    fn docs_submit(&self, entry: lazy_client_core::DocJournalEntry) {
+        let operation = entry.operation_id;
+        if !self.send(JournalCommand::DocsSubmit(entry)) {
+            let _ = self.inputs.try_send(Input::DocsPersistFailed {
+                operation,
+                reason: "the client is shutting down".into(),
+            });
+        }
+    }
+
+    fn docs_settle(&self, operation: OperationId) {
+        self.send(JournalCommand::DocsSettle(operation));
+    }
+
     fn queue_view(&self, view: ViewState) {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).view = Some(view);
         self.dirty.notify_one();
@@ -2119,6 +2166,35 @@ impl Persistence {
                         },
                     };
                     let _ = self.inputs.send(input).await;
+                }
+                JournalCommand::DocsSubmit(entry) => {
+                    let operation = entry.operation_id;
+                    let result = tokio::task::spawn_blocking(move || {
+                        this.lock_store().add_docs_journal(entry)
+                    })
+                    .await;
+                    let input = match result {
+                        Ok(Ok(())) => Input::DocsPersisted { operation },
+                        Ok(Err(error)) => Input::DocsPersistFailed {
+                            operation,
+                            reason: error.to_string(),
+                        },
+                        Err(error) => Input::DocsPersistFailed {
+                            operation,
+                            reason: format!("storage task failed ({})", task_failure(&error)),
+                        },
+                    };
+                    let _ = self.inputs.send(input).await;
+                }
+                JournalCommand::DocsSettle(operation) => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        this.lock_store().settle_docs(operation)
+                    })
+                    .await;
+                    if let Ok(Err(error)) = result {
+                        let message = format!("Couldn't update the unsaved-pages journal: {error}");
+                        let _ = self.inputs.send(Input::StorageProblem(message)).await;
+                    }
                 }
                 JournalCommand::Settle(operation) => {
                     let result =
@@ -2231,6 +2307,7 @@ pub fn inspect_state(profile_dir: &Path, key: &[u8; 32]) -> StartupState {
     StartupState {
         session_restored: false,
         journal: recovered.journal,
+        docs_journal: recovered.docs_journal,
         drafts: recovered.drafts,
         thread_drafts: recovered.thread_drafts,
         view: recovered.view,

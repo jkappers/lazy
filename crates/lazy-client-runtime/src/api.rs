@@ -188,6 +188,45 @@ impl Api {
         finish_unit(self.send(request).await).await
     }
 
+    /// `POST` of a JSON body where any success status counts and the body, if any, is ignored.
+    pub(crate) async fn post_json_unit<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(), RequestError> {
+        let request = self.with_auth(
+            self.http.post(self.url(path)).json(body),
+            self.token().as_ref(),
+        );
+        finish_unit(self.send(request).await).await
+    }
+
+    /// `DELETE` with a JSON body (the operation id), answered with JSON.
+    pub(crate) async fn delete_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, RequestError> {
+        let request = self.with_auth(
+            self.http.delete(self.url(path)).json(body),
+            self.token().as_ref(),
+        );
+        finish(self.send(request).await).await
+    }
+
+    /// `DELETE` with a JSON body, where any success status counts and the body is ignored.
+    pub(crate) async fn delete_json_unit<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(), RequestError> {
+        let request = self.with_auth(
+            self.http.delete(self.url(path)).json(body),
+            self.token().as_ref(),
+        );
+        finish_unit(self.send(request).await).await
+    }
+
     /// `DELETE`, answered with JSON.
     pub(crate) async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, RequestError> {
         let request = self.with_auth(self.http.delete(self.url(path)), self.token().as_ref());

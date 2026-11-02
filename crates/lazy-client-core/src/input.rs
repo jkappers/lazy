@@ -497,6 +497,23 @@ pub enum Input {
         operation: OperationId,
         result: Result<OperationStatus, RequestError>,
     },
+    // ----- Docs (D30) -----
+    /// Something the person did with pages, boards, versions, or notations.
+    Docs(crate::docs::DocsInput),
+    /// The answer to `DocsEffect::Request` with this `id`.
+    DocsReply {
+        id: u64,
+        result: Result<crate::docs::DocsAnswer, RequestError>,
+    },
+    /// The journal entry of this create or save is durable; its request may go out.
+    DocsPersisted {
+        operation: OperationId,
+    },
+    /// The journal entry could not be written; nothing was sent.
+    DocsPersistFailed {
+        operation: OperationId,
+        reason: String,
+    },
     Socket(SocketEvent),
     /// A frame received on the realtime connection.
     Frame(ServerFrame),

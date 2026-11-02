@@ -14,6 +14,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::element::TextElement;
 use super::layout::LayoutState;
+use super::live::{self, Display, StyledLine};
 use super::model::{Direction, EditorModel, Unit};
 use super::style::{SubmitChord, TextInputOptions, TextInputStyle};
 use super::unicode::{floor_char_boundary, next_grapheme_boundary};
@@ -263,6 +264,10 @@ pub struct TextInput {
     formatting_shortcuts: bool,
     report_up_when_empty: bool,
     paste_attachments: bool,
+    /// Markdown is drawn as it is typed (see [`super::live`]).
+    live: bool,
+    /// The analysis of the text for the revision it was made for.
+    analysis: RefCell<Option<(u64, Rc<Vec<StyledLine>>)>>,
     /// While a host's suggestion list is open, Up, Down, Enter, and Tab go to it.
     suggestions_open: bool,
     pub(crate) masked: bool,
@@ -302,6 +307,7 @@ impl TextInput {
         let live = cx.default_global::<LiveInputs>();
         live.0.retain(|other| other.upgrade().is_some());
         live.0.push(weak);
+        let live_markdown = options.live_markdown && !options.single_line && !options.masked;
         Self {
             focus_handle: cx.focus_handle().tab_stop(true),
             model: EditorModel::new(options.max_bytes, options.single_line),
@@ -309,9 +315,11 @@ impl TextInput {
             accessible_label: options.accessible_label,
             single_line: options.single_line,
             pass_through_navigation: options.pass_through_navigation,
-            formatting_shortcuts: options.formatting_shortcuts,
+            formatting_shortcuts: options.formatting_shortcuts || live_markdown,
             report_up_when_empty: options.report_up_when_empty,
             paste_attachments: options.paste_attachments,
+            live: live_markdown,
+            analysis: RefCell::new(None),
             suggestions_open: false,
             masked: options.masked,
             max_lines: options.max_lines.max(1),
@@ -381,10 +389,11 @@ impl TextInput {
         if layout.revision != self.model.revision() || layout.showing_placeholder {
             return None;
         }
-        let at = layout.point_for_offset(self.display_offset(self.model.cursor()));
+        let display = self.display_offset(self.model.cursor());
+        let at = layout.point_for_offset(display);
         Some(Bounds::new(
             area.origin - self.scroll + at,
-            gpui::size(self.style.caret_width, layout.line_height),
+            gpui::size(self.style.caret_width, layout.height_for_offset(display)),
         ))
     }
 
@@ -516,10 +525,52 @@ impl TextInput {
         text
     }
 
-    /// Display offset for a model offset. Identity unless masked.
+    /// The styled lines of the text, for live markdown. `None` for a plain input, an empty one, and
+    /// text too long to style.
+    pub(crate) fn live_lines(&self) -> Option<Rc<Vec<StyledLine>>> {
+        if !self.live || self.model.is_empty() || self.model.len() > live::LIVE_MAX_BYTES {
+            return None;
+        }
+        let revision = self.model.revision();
+        if let Some((cached, lines)) = &*self.analysis.borrow()
+            && *cached == revision
+        {
+            return Some(lines.clone());
+        }
+        let lines = Rc::new(live::analyze(self.model.text()));
+        *self.analysis.borrow_mut() = Some((revision, lines.clone()));
+        Some(lines)
+    }
+
+    /// The bytes whose lines show their markdown syntax: the selection and any composition.
+    pub(crate) fn active_range(&self) -> Range<usize> {
+        let selection = self.model.selection().range();
+        match self.model.marked_range() {
+            Some(marked) => selection.start.min(marked.start)..selection.end.max(marked.end),
+            None => selection,
+        }
+    }
+
+    /// The display map of the current layout, if it is live markdown and describes the current
+    /// text.
+    fn live_display(&self) -> Option<Rc<Display>> {
+        if !self.live {
+            return None;
+        }
+        let layout = self.layout.try_borrow().ok()?;
+        let state = layout.as_ref()?;
+        (state.revision == self.model.revision())
+            .then(|| state.display.clone())
+            .flatten()
+    }
+
+    /// Display offset for a model offset. Identity unless masked or drawn as live markdown.
     pub(crate) fn display_offset(&self, real: usize) -> usize {
         if self.model.is_empty() {
             return 0;
+        }
+        if let Some(display) = self.live_display() {
+            return display.to_display(real.min(self.model.len()));
         }
         if !self.masked {
             return real;
@@ -529,10 +580,13 @@ impl TextInput {
         text[..end].graphemes(true).count() * MASK_CHAR.len_utf8()
     }
 
-    /// Model offset for a display offset. Identity unless masked.
+    /// Model offset for a display offset. Identity unless masked or drawn as live markdown.
     pub(crate) fn real_offset(&self, display: usize) -> usize {
         if self.model.is_empty() {
             return 0;
+        }
+        if let Some(shown) = self.live_display() {
+            return shown.to_model(display.min(shown.text.len()));
         }
         if !self.masked {
             return display;
@@ -775,11 +829,29 @@ impl TextInput {
             cx.emit(TextInputEvent::Suggestion(SuggestionKey::Accept));
             return;
         }
-        if self.single_line || self.submit_chord == SubmitChord::Enter {
+        if self.single_line || (self.submit_chord == SubmitChord::Enter && !self.live) {
             cx.emit(TextInputEvent::Submit);
         } else {
-            self.edit(window, cx, EditorModel::insert_newline);
+            self.new_line(window, cx);
         }
+    }
+
+    /// A line break from Enter. In live markdown it continues a list, task, or quote, and on an
+    /// empty item ends the list.
+    fn new_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.live
+            && self.model.selection().is_empty()
+            && !self.model.is_composing()
+            && let Some(lines) = self.live_lines()
+            && let Some(edit) = live::enter_edit(&lines, self.model.text(), self.model.cursor())
+        {
+            self.goal_x = None;
+            self.edit(window, cx, |model| {
+                model.replace_range(edit.range, &edit.insert)
+            });
+            return;
+        }
+        self.edit(window, cx, EditorModel::insert_newline);
     }
 
     fn insert_newline(&mut self, _: &InsertNewline, window: &mut Window, cx: &mut Context<Self>) {
@@ -1009,6 +1081,52 @@ impl TextInput {
         Some(self.real_offset(layout.offset_for_point(local)))
     }
 
+    /// The checkbox drawn under a window-coordinate position: the model byte that holds its state
+    /// and whether it is checked.
+    fn task_box_at(&self, position: Point<Pixels>) -> Option<(usize, bool)> {
+        let layout = self.layout.borrow();
+        let layout = layout.as_ref()?;
+        if layout.revision != self.model.revision() {
+            return None;
+        }
+        let bounds = layout.bounds?;
+        let display = layout.display.as_ref()?;
+        let local = position - bounds.origin + self.scroll;
+        let row_ix = layout
+            .rows
+            .partition_point(|row| row.y + row.height <= local.y)
+            .min(layout.rows.len() - 1);
+        let row = &layout.rows[row_ix];
+        let line = display.lines.get(row.line)?;
+        let task = line.task.as_ref()?;
+        if row.start != line.start || local.y < row.y {
+            return None;
+        }
+        let (left, right) = (
+            layout.x_in_row(row_ix, task.display.start),
+            layout.x_in_row(row_ix, task.display.end),
+        );
+        (local.x >= left && local.x < right).then_some((task.model_char, task.checked))
+    }
+
+    /// Ticks or unticks the checkbox whose state is the byte at `at`, keeping the selection.
+    fn toggle_task(
+        &mut self,
+        at: usize,
+        checked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (anchor, head) = self.selection();
+        let replacement = if checked { " " } else { "x" };
+        self.goal_x = None;
+        self.edit(window, cx, |model| {
+            let changed = model.replace_range(at..at + 1, replacement);
+            model.select(anchor, head);
+            changed
+        });
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1020,6 +1138,14 @@ impl TextInput {
         }
         window.focus(&self.focus_handle, cx);
         window.request_virtual_keyboard();
+        if self.live
+            && event.click_count == 1
+            && !event.modifiers.shift
+            && let Some((at, checked)) = self.task_box_at(event.position)
+        {
+            self.toggle_task(at, checked, window, cx);
+            return;
+        }
         let Some(offset) = self.offset_at_position(event.position) else {
             return;
         };
@@ -1376,7 +1502,7 @@ impl EntityInputHandler for TextInput {
         );
         Some(Bounds::from_corners(
             origin + point(x0, row.y),
-            origin + point(x1, row.y + layout.line_height),
+            origin + point(x1, row.y + row.height),
         ))
     }
 

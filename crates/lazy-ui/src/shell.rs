@@ -26,10 +26,11 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::dialogs::{
     AddWorkspaceDialog, BrowseChannelsDialog, CreateChannelDialog, CustomEmojiDialog,
     DeleteMessageDialog, DetailsDialog, DetailsRequest, DiagnosticsDialog, GroupsDialog,
-    InvitationsDialog, PeopleDialog, PeopleMode, PreferencesDialog, ProfileDialog, ProfileRequest,
-    QuickSwitcherChoice, QuickSwitcherDialog, QuickSwitcherRun, ShortcutsDialog, UpdatesDialog,
-    WorkspaceSettingsDialog,
+    InvitationsDialog, MovePageDialog, PeopleDialog, PeopleMode, PreferencesDialog, ProfileDialog,
+    ProfileRequest, PurgePageDialog, QuickSwitcherChoice, QuickSwitcherDialog, QuickSwitcherRun,
+    ShortcutsDialog, UpdatesDialog, WorkspaceSettingsDialog,
 };
+use crate::docs::{DocsEvent, DocsView};
 use crate::emoji_font;
 use crate::emoji_picker::{EmojiPicker, EmojiPickerEvent, PickerPrefs};
 use crate::form::{self, ButtonKind};
@@ -128,6 +129,16 @@ pub enum ShellDialog {
     Diagnostics,
     /// Help, Check for updates…
     Updates,
+    /// Confirm deleting a trashed page or board for good.
+    PurgePage {
+        page: lazy_domain::PageId,
+        title: String,
+    },
+    /// Choose the conversation a page or board moves to.
+    MovePage {
+        page: lazy_domain::PageId,
+        from: ConversationId,
+    },
 }
 
 /// A search result being opened.
@@ -170,6 +181,11 @@ pub struct ShellView {
     people: Entity<PeopleDirectoryView>,
     people_return_focus: Option<FocusHandle>,
     people_selected_at_open: Option<ConversationId>,
+    /// A conversation's pages and boards, and the person's notes, shown in place of the
+    /// conversation while docs are open.
+    docs: Entity<DocsView>,
+    docs_return_focus: Option<FocusHandle>,
+    docs_selected_at_open: Option<ConversationId>,
     /// "Message" or a person chosen in the quick switcher asked for a conversation: when it
     /// opens, the keyboard goes to its composer.
     awaiting_conversation: bool,
@@ -213,6 +229,7 @@ impl ShellView {
         let inbox = cx.new(|cx| ThreadInboxView::new(model.clone(), window, cx));
         let saved = cx.new(|cx| SavedMessagesView::new(model.clone(), window, cx));
         let people = cx.new(|cx| PeopleDirectoryView::new(model.clone(), window, cx));
+        let docs = cx.new(|cx| DocsView::new(model.clone(), window, cx));
         let thread_timeline = thread_pane.read(cx).timeline().clone();
         let thread_composer = thread_pane.read(cx).composer().clone();
         let mut subscriptions = Vec::new();
@@ -253,6 +270,13 @@ impl ShellView {
                 {
                     this.close_people(false, window, cx);
                 }
+                // Docs belong to the conversation that was open; another one ends them.
+                if this.docs.read(cx).is_open()
+                    && this.model.read(cx).core().selected_conversation()
+                        != this.docs_selected_at_open
+                {
+                    this.close_docs(false, window, cx);
+                }
             }
             cx.notify();
         }));
@@ -283,6 +307,19 @@ impl ShellView {
                     conversation,
                     message,
                 } => this.open_saved_message(*conversation, *message, window, cx),
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &docs,
+            window,
+            |this, _docs, event: &DocsEvent, window, cx| match event {
+                DocsEvent::Close => this.close_docs(true, window, cx),
+                DocsEvent::ConfirmPurge { page, title } => {
+                    this.open_purge_page(*page, title.clone(), window, cx)
+                }
+                DocsEvent::ChoosePlace { page, from } => {
+                    this.open_move_page(*page, *from, window, cx)
+                }
             },
         ));
         subscriptions.push(cx.subscribe_in(
@@ -338,6 +375,7 @@ impl ShellView {
                     SidebarEvent::Inbox => CommandId::Threads,
                     SidebarEvent::Saved => CommandId::Saved,
                     SidebarEvent::People => CommandId::People,
+                    SidebarEvent::Docs => CommandId::Docs,
                     SidebarEvent::QuickSwitcher => CommandId::QuickSwitcher,
                     SidebarEvent::Preferences => CommandId::Preferences,
                     SidebarEvent::Menu => return this.open_command_menu(window, cx),
@@ -494,6 +532,9 @@ impl ShellView {
             people,
             people_return_focus: None,
             people_selected_at_open: None,
+            docs,
+            docs_return_focus: None,
+            docs_selected_at_open: None,
             awaiting_conversation: false,
             bell_focus: cx.focus_handle().tab_stop(true),
             bell_menu: None,
@@ -630,6 +671,7 @@ impl ShellView {
         self.close_inbox(false, window, cx);
         self.close_saved(false, window, cx);
         self.close_people(false, window, cx);
+        self.close_docs(false, window, cx);
         self.search_return_focus = window.focused(cx);
         self.search_selected_at_open = self.model.read(cx).core().selected_conversation();
         self.picker = None;
@@ -746,10 +788,12 @@ impl ShellView {
             self.inbox.update(cx, |inbox, cx| inbox.reset(window, cx));
             return;
         }
-        // Search, the inbox, the saved messages and the people share the conversation's place.
+        // Search, the inbox, the saved messages, the people, and docs share the conversation's
+        // place.
         self.close_search(false, window, cx);
         self.close_saved(false, window, cx);
         self.close_people(false, window, cx);
+        self.close_docs(false, window, cx);
         self.inbox_return_focus = window.focused(cx);
         self.inbox_selected_at_open = self.model.read(cx).core().selected_conversation();
         self.picker = None;
@@ -797,6 +841,7 @@ impl ShellView {
         self.close_search(false, window, cx);
         self.close_inbox(false, window, cx);
         self.close_people(false, window, cx);
+        self.close_docs(false, window, cx);
         self.saved_return_focus = window.focused(cx);
         self.saved_selected_at_open = self.model.read(cx).core().selected_conversation();
         self.picker = None;
@@ -895,6 +940,123 @@ impl ShellView {
         window.focus(&focus, cx);
     }
 
+    // ----- Docs -----
+
+    /// The docs view, for tests.
+    pub fn docs_view(&self) -> &Entity<DocsView> {
+        &self.docs
+    }
+
+    /// Whether docs are showing in place of the conversation.
+    pub fn docs_open(&self, cx: &gpui::App) -> bool {
+        self.docs.read(cx).is_open()
+    }
+
+    /// Makes room for docs: the views that share the conversation's place give way.
+    fn make_room_for_docs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_search(false, window, cx);
+        self.close_inbox(false, window, cx);
+        self.close_saved(false, window, cx);
+        self.close_people(false, window, cx);
+        self.picker = None;
+        if self.pane_layout.get().replaces_conversation
+            && self.model.read(cx).core().open_thread().is_some()
+        {
+            self.model
+                .update(cx, |model, cx| model.dispatch(Input::CloseThread, cx));
+        }
+        if !self.docs.read(cx).is_open() {
+            self.docs_return_focus = window.focused(cx);
+        }
+        self.docs_selected_at_open = self.model.read(cx).core().selected_conversation();
+    }
+
+    /// Opens the docs in place of the conversation: every page and board the person can read.
+    /// The open conversation is where a new page goes unless another is chosen.
+    pub fn open_docs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let core = self.model.read(cx).core();
+        let (home, Some(workspace)) = (core.selected_conversation(), core.active_workspace())
+        else {
+            return;
+        };
+        self.make_room_for_docs(window, cx);
+        self.docs.update(cx, |docs, cx| {
+            docs.open_workspace(workspace, home, window, cx)
+        });
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_docs_open(true, cx));
+        cx.notify();
+    }
+
+    /// Opens the person's notes in place of the conversation.
+    pub fn open_notes_for_me(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let core = self.model.read(cx).core();
+        let (conversation, Some(workspace)) =
+            (core.selected_conversation(), core.active_workspace())
+        else {
+            return;
+        };
+        self.make_room_for_docs(window, cx);
+        self.docs.update(cx, |docs, cx| {
+            docs.open_notes(workspace, conversation, window, cx)
+        });
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_docs_open(true, cx));
+        cx.notify();
+    }
+
+    /// Closes docs. With `restore`, the keyboard goes back to where it was.
+    fn close_docs(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.docs.read(cx).is_open() {
+            return;
+        }
+        self.docs.update(cx, |docs, cx| docs.close(cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_docs_open(false, cx));
+        let previous = self.docs_return_focus.take();
+        if restore {
+            match previous {
+                Some(previous) => window.focus(&previous, cx),
+                None => self
+                    .composer
+                    .update(cx, |composer, cx| composer.focus_input(window, cx)),
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_purge_page(
+        &mut self,
+        page: lazy_domain::PageId,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.model.clone();
+        let dialog = cx.new(|cx| PurgePageDialog::new(model, page, title, window, cx));
+        self.show(dialog, Vec::new(), window, cx);
+        // Docs stay open behind the dialog: this is not a different conversation.
+        self.selected_at_open = self.model.read(cx).core().selected_conversation();
+    }
+
+    fn open_move_page(
+        &mut self,
+        page: lazy_domain::PageId,
+        from: ConversationId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let model = self.model.clone();
+        let dialog = cx.new(|cx| MovePageDialog::new(model, page, from, window, cx));
+        self.show(dialog, Vec::new(), window, cx);
+    }
+
     // ----- The people directory and profiles -----
 
     /// The people directory, for tests.
@@ -916,6 +1078,7 @@ impl ShellView {
         self.close_search(false, window, cx);
         self.close_inbox(false, window, cx);
         self.close_saved(false, window, cx);
+        self.close_docs(false, window, cx);
         self.people_return_focus = window.focused(cx);
         self.people_selected_at_open = self.model.read(cx).core().selected_conversation();
         self.picker = None;
@@ -1027,6 +1190,9 @@ impl ShellView {
     /// Everything the command rules read, now.
     pub fn snapshot(&self, cx: &gpui::App) -> commands::AppSnapshot {
         let mut snapshot = commands::AppSnapshot::from_core(self.model.read(cx).core());
+        if self.docs.read(cx).is_open() {
+            snapshot.view = commands::MainView::Docs;
+        }
         snapshot.dialog = self.dialog_state(cx);
         snapshot.composing = crate::text_input::any_input_composing(cx);
         snapshot
@@ -1051,6 +1217,8 @@ impl ShellView {
             CommandId::Threads => self.open_inbox(window, cx),
             CommandId::Saved => self.open_saved(window, cx),
             CommandId::People => self.open_people_directory(window, cx),
+            CommandId::Docs => self.open_docs(window, cx),
+            CommandId::NotesForMe => self.open_notes_for_me(window, cx),
             CommandId::BrowseChannels => self.open_browse(None, window, cx),
             CommandId::NewMessage => self.open_new_message(window, cx),
             CommandId::CreateChannel => self.open_create_channel(window, cx),
@@ -1727,6 +1895,8 @@ impl ShellView {
             ShellDialog::Shortcuts => self.open_shortcuts(window, cx),
             ShellDialog::Diagnostics => self.open_diagnostics(window, cx),
             ShellDialog::Updates => self.open_updates(window, cx),
+            ShellDialog::PurgePage { page, title } => self.open_purge_page(page, title, window, cx),
+            ShellDialog::MovePage { page, from } => self.open_move_page(page, from, window, cx),
         }
     }
 
@@ -2273,7 +2443,14 @@ impl Render for ShellView {
         let inbox_open = self.model.read(cx).core().inbox().is_some();
         let saved_open = self.model.read(cx).core().saved().open;
         let people_open = self.model.read(cx).core().people().open;
+        let docs_open = self.docs.read(cx).is_open();
         match selected {
+            _ if docs_open => {
+                if let Some(banner) = self.banner(&theme, cx) {
+                    main = main.child(banner);
+                }
+                main = main.child(div().flex_1().min_h_0().child(self.docs.clone()));
+            }
             _ if saved_open => {
                 if let Some(banner) = self.banner(&theme, cx) {
                     main = main.child(banner);

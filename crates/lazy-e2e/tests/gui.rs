@@ -640,3 +640,92 @@ fn a_gui_client_searches_and_opens_a_result_with_the_keyboard() {
         database.drop().await;
     });
 }
+
+/// A page written through the real views: the title and the text are typed with the keyboard, the
+/// pause after typing saves them, and the other window finds the page in the workspace's docs
+/// and reads it.
+#[test]
+fn two_gui_clients_write_and_read_a_page_through_the_real_views() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let database = rt.block_on(TempDatabase::create());
+    let server = rt.block_on(async { testing::spawn_test_server(database.pool.clone()).await });
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut alice = GuiClient::start("alice", &server.base_url, &dir.path().join("alice"));
+    let mut bob = GuiClient::start("bob", &server.base_url, &dir.path().join("bob"));
+    alice.register_with_the_keyboard("alice", "Alice Nguyen");
+    bob.register_with_the_keyboard("bob", "Bob Okafor");
+
+    // The Docs shortcut opens the workspace's docs; Tab reaches the toggle, Notes for me, and New,
+    // Enter opens New's menu and Enter again takes its first item, a page.
+    alice.key(&lazy_ui::commands::keystroke("secondary-shift-d"));
+    alice.wait_until("the (empty) list", |core| {
+        core.active_workspace().is_some_and(|w| {
+            core.workspace_pages(w, lazy_protocol::PageState::Live)
+                .is_some_and(|list| matches!(list.load, lazy_client_core::LoadStatus::Ready))
+        })
+    });
+    alice.keys("tab tab tab enter enter");
+    alice.wait_until("the new page open", |core| {
+        core.open_page()
+            .is_some_and(|open| open.base.is_some() && open.title == "Untitled")
+    });
+
+    // The new page starts with the keyboard in its title, all selected: type it, Enter moves to
+    // the text, type that. The pause saves it.
+    alice.type_text("Launch plan");
+    alice.key("enter");
+    alice.type_text("Ship on Friday");
+    // The headless window runs on a clock that only moves when it is told to.
+    alice
+        .cx
+        .advance_clock(lazy_ui::docs::AUTOSAVE_AFTER + Duration::from_millis(5));
+    alice.settle();
+    alice.wait_until("the page saved", |core| {
+        core.open_page().is_some_and(|open| {
+            open.save == lazy_client_core::SaveState::Saved
+                && open.base.as_ref().is_some_and(|base| {
+                    base.summary.title == "Launch plan"
+                        && base.content
+                            == lazy_domain::page::PageContent::Page {
+                                body: "Ship on Friday".into(),
+                            }
+                })
+        })
+    });
+
+    // Bob opens docs, finds the page by its title, and reads it.
+    bob.key(&lazy_ui::commands::keystroke("secondary-shift-d"));
+    bob.wait_until("the page in Bob's list", |core| {
+        core.active_workspace().is_some_and(|w| {
+            core.workspace_pages(w, lazy_protocol::PageState::Live)
+                .is_some_and(|list| list.pages.iter().any(|p| p.title == "Launch plan"))
+        })
+    });
+    bob.keys("enter");
+    bob.wait_until("the page open for Bob", |core| {
+        core.open_page().is_some_and(|open| {
+            open.base.as_ref().is_some_and(|base| {
+                base.content
+                    == lazy_domain::page::PageContent::Page {
+                        body: "Ship on Friday".into(),
+                    }
+            })
+        })
+    });
+    if let Some(dir) = std::env::var_os("LAZY_SCREENSHOT_DIR").map(PathBuf::from) {
+        alice.screenshot_as(&dir, "docs");
+        bob.screenshot_as(&dir, "docs");
+    }
+
+    alice.stop();
+    bob.stop();
+    rt.block_on(async {
+        server.shutdown().await.unwrap();
+        database.drop().await;
+    });
+}

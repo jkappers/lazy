@@ -25,14 +25,14 @@
 
 use lazy_domain::notification::{ConversationNotificationPrefs, NotificationSettings, UserStatus};
 use lazy_domain::{
-    ConversationId, DisplayName, EventSeq, GroupId, MessageId, OperationId, Timestamp, UserId,
-    WorkspaceId, WorkspaceRole,
+    ConversationId, DisplayName, EventSeq, GroupId, MessageId, NotationId, OperationId, PageId,
+    Timestamp, UserId, WorkspaceId, WorkspaceRole,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Conversation, ConversationUserState, CustomEmoji, ErrorCode, Mentions, Message,
-    ReactionSummary, ThreadSummary, ThreadUserState, User, UserGroup, Workspace,
+    Conversation, ConversationUserState, CustomEmoji, ErrorCode, Mentions, Message, Notation,
+    PageSummary, ReactionSummary, ThreadSummary, ThreadUserState, User, UserGroup, Workspace,
 };
 
 /// Something that happened in a workspace.
@@ -155,6 +155,37 @@ pub enum Event {
     /// The recipient's own favorite flag or read position changed, possibly on another device.
     /// Delivered only to that person.
     UserStateChanged { state: ConversationUserState },
+    /// A page or board was created, edited, moved, trashed, or restored. `page` is its complete
+    /// new summary (no content); a client applies it only if its `revision` is newer than the
+    /// one it holds, or if the trash state differs at the same revision. A move out of a
+    /// conversation is delivered to the members of the new one, and to those of the old one as
+    /// [`Event::PageRemoved`]. Delivered to the conversation's members.
+    PageChanged {
+        page: PageSummary,
+        /// The operation that made the change, so its author can reconcile.
+        operation_id: Option<OperationId>,
+    },
+    /// A page left the conversation for good: it was purged, or moved elsewhere. Delivered to the
+    /// conversation's members.
+    PageRemoved {
+        conversation_id: ConversationId,
+        page_id: PageId,
+    },
+    /// A notation was made, edited, completed, reopened, or replied to. `notation` is complete,
+    /// `open_notations` is the page's new count of open ones, and a client keeps the notation with
+    /// the latest `updated_at`. Delivered to the conversation's members.
+    NotationChanged {
+        notation: Notation,
+        open_notations: u32,
+    },
+    /// A notation was deleted. `open_notations` is the page's new count. Delivered to the
+    /// conversation's members.
+    NotationRemoved {
+        conversation_id: ConversationId,
+        page_id: PageId,
+        notation_id: NotationId,
+        open_notations: u32,
+    },
 }
 
 /// An event with its position in the workspace's log.

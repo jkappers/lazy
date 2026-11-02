@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use lazy_client_core::{ContentCache, JournalEntry, ThreadDraft, ViewState};
+use lazy_client_core::{ContentCache, DocJournalEntry, JournalEntry, ThreadDraft, ViewState};
 use lazy_domain::{ConversationId, OperationId};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,8 @@ use crate::files::{FileError, FileKind, FileStore, Loaded, WriteStep};
 
 /// Most unsettled submissions kept. More are refused so the file stays bounded.
 pub(crate) const MAX_JOURNAL_ENTRIES: usize = 256;
+/// Most page creations and saves waiting to be settled.
+pub(crate) const MAX_DOCS_JOURNAL_ENTRIES: usize = 32;
 /// Most drafts kept.
 pub(crate) const MAX_DRAFTS: usize = 200;
 /// Most thread drafts kept.
@@ -30,6 +32,11 @@ pub(crate) const MAX_DRAFT_BYTES: usize = 64 * 1024;
 #[derive(Serialize, Deserialize)]
 struct JournalFile {
     entries: Vec<JournalEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DocsJournalFile {
+    entries: Vec<DocJournalEntry>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -51,6 +58,8 @@ pub(crate) enum StoreError {
     Locked(&'static str),
     #[error("too many unsent messages are waiting to be confirmed")]
     JournalFull,
+    #[error("too many page changes are waiting to be confirmed")]
+    DocsJournalFull,
     #[error(transparent)]
     File(#[from] FileError),
 }
@@ -81,6 +90,7 @@ struct CacheFromDisk {
 #[derive(Debug, Default)]
 pub(crate) struct Recovered {
     pub(crate) journal: Vec<JournalEntry>,
+    pub(crate) docs_journal: Vec<DocJournalEntry>,
     pub(crate) drafts: HashMap<ConversationId, String>,
     pub(crate) thread_drafts: Vec<ThreadDraft>,
     pub(crate) view: ViewState,
@@ -92,6 +102,7 @@ pub(crate) struct Recovered {
 pub(crate) struct StateStore {
     files: FileStore,
     journal: Vec<JournalEntry>,
+    docs_journal: Vec<DocJournalEntry>,
     drafts: BTreeMap<ConversationId, String>,
     thread_drafts: Vec<ThreadDraft>,
     view: ViewState,
@@ -136,6 +147,38 @@ impl StateStore {
             }
         }
         journal.truncate(MAX_JOURNAL_ENTRIES);
+
+        let mut docs_journal = Vec::new();
+        match files.load::<DocsJournalFile>(FileKind::DocsJournal) {
+            Loaded::Value(file) => docs_journal = file.entries,
+            Loaded::Missing => {}
+            Loaded::Corrupt(message) => {
+                let message = format!(
+                    "{message} Page changes that were still being saved may need to be made again."
+                );
+                note(
+                    FileKind::DocsJournal,
+                    message,
+                    false,
+                    &mut recovered.problems,
+                )
+            }
+            Loaded::NewerFormat(found) => note(
+                FileKind::DocsJournal,
+                format!(
+                    "The unsaved-pages journal was written by a newer version of Lazy (format {found}); saving pages is disabled."
+                ),
+                true,
+                &mut recovered.problems,
+            ),
+            Loaded::Unreadable(message) => note(
+                FileKind::DocsJournal,
+                message,
+                true,
+                &mut recovered.problems,
+            ),
+        }
+        docs_journal.truncate(MAX_DOCS_JOURNAL_ENTRIES);
 
         let mut drafts = BTreeMap::new();
         let mut thread_drafts = Vec::new();
@@ -222,6 +265,7 @@ impl StateStore {
         }
 
         recovered.journal = journal.clone();
+        recovered.docs_journal = docs_journal.clone();
         recovered.drafts = drafts.iter().map(|(k, v)| (*k, v.clone())).collect();
         recovered.thread_drafts = thread_drafts.clone();
         recovered.view = view.clone();
@@ -229,6 +273,7 @@ impl StateStore {
             Self {
                 files,
                 journal,
+                docs_journal,
                 drafts,
                 thread_drafts,
                 view,
@@ -290,6 +335,52 @@ impl StateStore {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Durably records a page creation or save. Recording the same operation again is a no-op.
+    pub(crate) fn add_docs_journal(&mut self, entry: DocJournalEntry) -> Result<(), StoreError> {
+        self.check_writable(FileKind::DocsJournal)?;
+        if self
+            .docs_journal
+            .iter()
+            .any(|e| e.operation_id == entry.operation_id)
+        {
+            return Ok(());
+        }
+        if self.docs_journal.len() >= MAX_DOCS_JOURNAL_ENTRIES {
+            return Err(StoreError::DocsJournalFull);
+        }
+        self.docs_journal.push(entry);
+        if let Err(error) = self.write_docs_journal() {
+            self.docs_journal.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Removes a settled page creation or save.
+    pub(crate) fn settle_docs(&mut self, operation: OperationId) -> Result<(), StoreError> {
+        self.check_writable(FileKind::DocsJournal)?;
+        let Some(index) = self
+            .docs_journal
+            .iter()
+            .position(|e| e.operation_id == operation)
+        else {
+            return Ok(());
+        };
+        let removed = self.docs_journal.remove(index);
+        if let Err(error) = self.write_docs_journal() {
+            self.docs_journal.insert(index, removed);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn write_docs_journal(&self) -> Result<(), StoreError> {
+        let file = DocsJournalFile {
+            entries: self.docs_journal.clone(),
+        };
+        Ok(self.files.save(FileKind::DocsJournal, &file)?)
     }
 
     fn write_journal(&self) -> Result<(), StoreError> {
@@ -396,6 +487,7 @@ impl StateStore {
         // Position files written by earlier versions.
         self.files.remove_legacy("cursors.enc");
         self.journal.clear();
+        self.docs_journal.clear();
         self.drafts.clear();
         self.locked.clear();
     }
@@ -1752,5 +1844,104 @@ mod tests {
         assert_eq!(dir.path().read_dir().unwrap().count(), 0);
         let (_, recovered) = StateStore::open(dir.path().to_owned(), &KEY);
         assert!(recovered.journal.is_empty() && recovered.drafts.is_empty());
+    }
+
+    fn docs_entry(title: &str) -> DocJournalEntry {
+        use lazy_client_core::DocJournalAction;
+        let request = lazy_protocol::CreatePageRequest {
+            operation_id: OperationId::generate(),
+            page_id: lazy_domain::PageId::generate(),
+            kind: lazy_domain::page::PageKind::Page,
+            title: title.to_owned(),
+            content: None,
+        };
+        DocJournalEntry {
+            operation_id: request.operation_id,
+            user_id: lazy_domain::UserId::generate(),
+            submitted_at: lazy_domain::Timestamp::now(),
+            action: DocJournalAction::Create {
+                conversation: ConversationId::generate(),
+                request,
+            },
+        }
+    }
+
+    #[test]
+    fn the_docs_journal_survives_a_restart_until_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (docs_entry("a"), docs_entry("b"));
+        {
+            let (mut store, recovered) = StateStore::open(dir.path().to_owned(), &KEY);
+            assert!(recovered.docs_journal.is_empty());
+            store.add_docs_journal(first.clone()).unwrap();
+            store.add_docs_journal(second.clone()).unwrap();
+            store.add_docs_journal(second.clone()).unwrap();
+            store.settle_docs(first.operation_id).unwrap();
+            // Settling what is not there is fine.
+            store.settle_docs(first.operation_id).unwrap();
+        }
+        let (_, recovered) = StateStore::open(dir.path().to_owned(), &KEY);
+        assert_eq!(recovered.docs_journal, vec![second]);
+        assert!(recovered.problems.is_empty());
+    }
+
+    #[test]
+    fn the_docs_journal_is_bounded_and_wiped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = StateStore::open(dir.path().to_owned(), &KEY);
+        for _ in 0..MAX_DOCS_JOURNAL_ENTRIES {
+            store.add_docs_journal(docs_entry("x")).unwrap();
+        }
+        assert!(matches!(
+            store.add_docs_journal(docs_entry("overflow")),
+            Err(StoreError::DocsJournalFull)
+        ));
+        store.wipe();
+        assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_corrupt_docs_journal_is_reported_and_not_silently_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut store, _) = StateStore::open(dir.path().to_owned(), &KEY);
+            store.add_docs_journal(docs_entry("x")).unwrap();
+        }
+        let path = dir.path().join("docs-journal.enc");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&path, bytes).unwrap();
+        let (_, recovered) = StateStore::open(dir.path().to_owned(), &KEY);
+        assert!(recovered.docs_journal.is_empty());
+        assert_eq!(recovered.problems.len(), 1, "{:?}", recovered.problems);
+    }
+
+    #[test]
+    fn a_cache_written_by_protocol_fourteen_is_discarded_without_a_warning_and_the_docs_journal_is_untouched()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = docs_entry("kept");
+        {
+            let (mut store, _) = StateStore::open(dir.path().to_owned(), &KEY);
+            store.add_docs_journal(entry.clone()).unwrap();
+        }
+        let files = FileStore::new(dir.path().to_owned(), &KEY);
+        // A cache exactly as version 14 wrote it: the shapes did not change, the number did.
+        let previous = serde_json::to_value(cache_of(1, 3, 10, 5)).unwrap();
+        files
+            .save(
+                FileKind::Cache,
+                &serde_json::json!({ "protocol_version": 14, "cache": previous }),
+            )
+            .unwrap();
+        let (_, recovered) = StateStore::open(dir.path().to_owned(), &KEY);
+        assert!(
+            recovered.cache.is_none(),
+            "an older protocol's cache is not used"
+        );
+        assert!(recovered.problems.is_empty(), "{:?}", recovered.problems);
+        assert!(!dir.path().join("cache.enc").exists());
+        assert_eq!(recovered.docs_journal, vec![entry]);
     }
 }

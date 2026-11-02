@@ -194,15 +194,27 @@ pub async fn begin_visible(
     mode: Lock,
 ) -> Result<(Transaction<'static, Postgres>, Loaded), AppError> {
     let mut tx = pool.begin().await?;
-    if !lock(&mut tx, id, mode).await? {
+    let loaded = join_visible(&mut tx, actor, id, mode).await?;
+    Ok((tx, loaded))
+}
+
+/// [`begin_visible`] inside a transaction that is already open: locks the conversation and loads
+/// the caller's relationship to it. A second conversation joined to the same transaction (moving
+/// a page) is locked after the first; shared locks never wait on each other.
+pub(crate) async fn join_visible(
+    conn: &mut PgConnection,
+    actor: UserId,
+    id: ConversationId,
+    mode: Lock,
+) -> Result<Loaded, AppError> {
+    if !lock(conn, id, mode).await? {
         return Err(not_found());
     }
     // A fresh statement after the lock sees everything committed before the lock was granted.
-    let loaded = load(&mut tx, actor, id)
+    load(conn, actor, id)
         .await?
         .filter(Loaded::can_read)
-        .ok_or_else(not_found)?;
-    Ok((tx, loaded))
+        .ok_or_else(not_found)
 }
 
 fn not_found() -> AppError {
@@ -225,6 +237,21 @@ async fn require_workspace_member(
 }
 
 // --- Reading conversations ------------------------------------------------------------------
+
+/// The conversations of one workspace that the person is a member of, for `GET
+/// /v1/workspaces/{id}/conversations`: the way a script (or a token) finds where pages live.
+/// `not_found` if the person is not an active member of the workspace. Public channels they have
+/// not joined are in [`browse_channels`], not here.
+pub async fn list_member(
+    pool: &PgPool,
+    actor: UserId,
+    workspace_id: WorkspaceId,
+) -> Result<lazy_protocol::ConversationListResponse, AppError> {
+    require_workspace_member(pool, workspace_id, actor).await?;
+    let mut conn = pool.acquire().await?;
+    let (conversations, _state) = member_conversations(&mut conn, actor, workspace_id).await?;
+    Ok(lazy_protocol::ConversationListResponse { conversations })
+}
 
 /// The people in a direct or group conversation, in the order [`ParticipantSet`] uses.
 async fn participants_of(

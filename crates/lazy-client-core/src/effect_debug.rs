@@ -117,6 +117,7 @@ impl fmt::Debug for Effect {
                 .field("params", &Named("SearchParams"))
                 .finish(),
             Effect::CancelSearch => f.write_str("CancelSearch"),
+            Effect::Docs(v0) => f.debug_tuple("Docs").field(v0).finish(),
             Effect::PersistRecentSearches(v0) => f
                 .debug_tuple("PersistRecentSearches")
                 .field(&Count("texts", v0.len()))

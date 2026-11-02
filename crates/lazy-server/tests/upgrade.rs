@@ -84,7 +84,7 @@ async fn a_database_left_by_the_previous_release_upgrades_in_place(pool: PgPool)
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
 
     let alice = account("alice", "1", 'a');
     let bob = account("bob", "2", 'b');
@@ -272,7 +272,7 @@ async fn a_database_left_by_the_mentions_release_upgrades_in_place_and_gains_thr
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     // Every message is still listed except the one that was deleted; nothing has a thread; the
     // mention rows are listed; the indexes the counts and pages use exist.
     let unlisted: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM messages WHERE NOT listed")
@@ -460,7 +460,7 @@ async fn a_database_left_by_the_threads_release_upgrades_in_place_and_gains_webh
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     // Everyone who was here is a person, with the password they had and the session they had; there
     // are no webhooks.
     let (people, bots, sessions, hooks): (i64, i64, i64, i64) = sqlx::query_as(
@@ -639,7 +639,7 @@ async fn a_database_left_by_the_webhooks_release_upgrades_in_place_and_gains_att
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     let files: i64 = sqlx::query_scalar("SELECT count(*) FROM attachments")
         .fetch_one(&pool)
         .await
@@ -808,7 +808,7 @@ async fn a_database_left_by_the_attachments_release_upgrades_in_place_and_gains_
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     let emoji: i64 = sqlx::query_scalar("SELECT count(*) FROM custom_emoji")
         .fetch_one(&pool)
         .await
@@ -999,7 +999,7 @@ async fn a_database_left_by_the_custom_emoji_release_upgrades_in_place_and_gains
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     let unindexed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM messages WHERE plain_text <> '' AND search_vector = ''::tsvector",
     )
@@ -1122,7 +1122,7 @@ async fn a_database_left_by_the_search_release_upgrades_in_place_and_gains_atten
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     let rows: i64 = sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM notification_settings) \
               + (SELECT count(*) FROM conversation_notification_prefs) \
@@ -1260,7 +1260,7 @@ async fn a_database_left_by_the_attention_release_upgrades_in_place_and_gains_di
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     let saved_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM saved_messages")
         .fetch_one(&pool)
         .await
@@ -1392,7 +1392,7 @@ async fn a_database_left_by_the_discovery_release_upgrades_in_place_and_gains_ad
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     let deactivated: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM workspace_members WHERE deactivated_at IS NOT NULL",
     )
@@ -1530,7 +1530,7 @@ async fn a_database_left_by_the_administration_release_upgrades_in_place_and_gai
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, (1..=15).collect::<Vec<i64>>());
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
     // Nobody has a picture, and no workspace has a creator (the old one is the default one).
     let (pictured, avatars, creators): (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM users WHERE avatar_version <> 0), \
@@ -1656,5 +1656,146 @@ async fn a_database_left_by_the_administration_release_upgrades_in_place_and_gai
     .await
     .unwrap();
     assert_eq!(uses, 2);
+    app.server.shutdown().await.unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_database_left_by_the_profiles_release_upgrades_in_place_and_gains_docs(pool: PgPool) {
+    for (version, data) in [
+        (5, Some(POPULATED)),
+        (6, Some(POPULATED_0006)),
+        (7, Some(POPULATED_0007)),
+        (8, Some(POPULATED_0008)),
+        (9, Some(POPULATED_0009)),
+        (10, Some(POPULATED_0010)),
+        (11, None),
+        (12, None),
+        (13, None),
+        (14, Some(POPULATED_0014)),
+        (15, None),
+    ] {
+        sqlx::migrate!("./migrations")
+            .run_to(version, &pool)
+            .await
+            .unwrap_or_else(|e| panic!("migrations up to {version}: {e}"));
+        if let Some(data) = data {
+            sqlx::raw_sql(data)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("the data of {version}: {e}"));
+        }
+    }
+    let before: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM attachments), \
+                (SELECT count(*) FROM operation_receipts), (SELECT count(*) FROM events)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    db::migrate(&pool).await.expect("migration 0016");
+    db::migrate(&pool)
+        .await
+        .expect("a second run changes nothing");
+    let applied: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(applied, (1..=17).collect::<Vec<i64>>());
+
+    // Nothing that was there changed, and nothing there is a page, a page file, or a notation.
+    let after: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM messages), (SELECT count(*) FROM attachments), \
+                (SELECT count(*) FROM operation_receipts), (SELECT count(*) FROM events)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before, after);
+    let docs: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM pages), (SELECT count(*) FROM notations), \
+                (SELECT count(*) FROM page_versions), \
+                (SELECT count(*) FROM attachments WHERE page_id IS NOT NULL)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(docs, (0, 0, 0, 0));
+    // Migration 0017 added the access-token table, empty; no session was touched by it.
+    let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM access_tokens")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tokens, 0);
+    // The receipts' shape rule still holds for the old kinds and admits the new ones.
+    let bad = sqlx::query(
+        "INSERT INTO operation_receipts (user_id, operation_id, request_hash, kind) \
+         SELECT id, gen_random_uuid(), decode(repeat('00', 32), 'hex'), 'create_page' FROM users LIMIT 1",
+    )
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err(), "a docs receipt must name its target");
+
+    let alice = account("alice", "1", 'a');
+    let bob = account("bob", "2", 'b');
+    let workspace_id: WorkspaceId = id("a0");
+    let general: ConversationId = id("c1");
+    let server = testing::spawn_test_server_with(
+        pool.clone(),
+        ServerOptions {
+            open_registration: true,
+            open_workspace_creation: true,
+            password_cost: PasswordCost::FAST_FOR_TESTS,
+            retention: RetentionPolicy::disabled(),
+        },
+    )
+    .await;
+    let app = App {
+        server,
+        pool: pool.clone(),
+        http: reqwest::Client::new(),
+        workspace_id,
+        general,
+    };
+
+    // Old history still reads, and docs work beside it, in a conversation that already existed.
+    let history = app.history_ok(&bob, general, &[]).await;
+    assert!(!history.messages.is_empty());
+    let page_id = lazy_domain::PageId::generate();
+    let created = app
+        .call(
+            reqwest::Method::POST,
+            &lazy_protocol::docs::doc_paths::conversation_pages(general),
+            &bob,
+            Some(serde_json::json!({
+                "operation_id": OperationId::generate(), "page_id": page_id, "kind": "page",
+                "title": "After the upgrade",
+                "content": {"kind": "page", "body": "alpha beta gamma"},
+            })),
+        )
+        .await;
+    assert!(created.status().is_success(), "{}", created.status());
+    let listed = app
+        .call(
+            reqwest::Method::GET,
+            &lazy_protocol::docs::doc_paths::conversation_pages(general),
+            &alice,
+            None,
+        )
+        .await;
+    let listed: lazy_protocol::PageListResponse = listed.json().await.unwrap();
+    assert_eq!(listed.pages.len(), 1);
+    assert_eq!(listed.pages[0].title, "After the upgrade");
+    // An old session still works beside the new kind of credential, which it can now make.
+    let me = app.call(reqwest::Method::GET, "/v1/me", &bob, None).await;
+    assert_eq!(me.status(), 200);
+    let listed = app
+        .call(reqwest::Method::GET, "/v1/tokens", &bob, None)
+        .await;
+    assert_eq!(listed.status(), 200);
+    // A new message still takes the next position after the old log.
+    let sent = app.send(&bob, general, "still works").await;
+    assert!(sent.seq.get() > 0);
     app.server.shutdown().await.unwrap();
 }

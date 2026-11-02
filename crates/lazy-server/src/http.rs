@@ -7,7 +7,9 @@ use axum::Json;
 use axum::Router;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, FromRequestParts, MatchedPath, Path, Query, Request, State,
+};
 use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -19,9 +21,11 @@ use lazy_domain::{
     MessageId, OperationId, UserId, WebhookId, WorkspaceId,
 };
 use lazy_protocol::api::paths;
+use lazy_protocol::docs::doc_paths;
 use lazy_protocol::{
-    AcceptInvitationRequest, CreateWorkspaceRequest, InvitationPreview, JoinedWorkspace,
-    PreviewInvitationRequest, ProfileResponse, ServerInfoResponse, UpdateProfileRequest,
+    AcceptInvitationRequest, ConversationListResponse, CreateTokenRequest, CreateTokenResponse,
+    CreateWorkspaceRequest, InvitationPreview, JoinedWorkspace, PreviewInvitationRequest,
+    ProfileResponse, ServerInfoResponse, TokenListResponse, UpdateProfileRequest,
 };
 use lazy_protocol::{
     AddMembersRequest, AttachmentResponse, BootstrapResponse, BrowseChannelsQuery,
@@ -48,7 +52,8 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::{
     admin, attachments, bootstrap, conversations, discovery, emoji, groups, logging, messages,
-    notifications, onboarding, profile, realtime, search, threads, webhooks, workspaces,
+    notifications, onboarding, openapi, profile, realtime, search, threads, token_routes, tokens,
+    webhooks, workspaces,
 };
 
 /// Largest accepted request body.
@@ -80,6 +85,16 @@ pub fn router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             FILE_TRANSFER_TIMEOUT,
         ));
+    let files = files.merge(
+        crate::docs_http::file_routes().layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            FILE_TRANSFER_TIMEOUT,
+        )),
+    );
+    let docs = crate::docs_http::routes().layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        REQUEST_TIMEOUT,
+    ));
     let api = Router::new()
         .route(paths::HEALTH, get(health))
         .route(paths::SERVER_INFO, get(server_info))
@@ -111,7 +126,10 @@ pub fn router(state: AppState) -> Router {
             paths::WORKSPACE_ROUTE,
             patch(update_workspace).put(create_workspace),
         )
-        .route(paths::ME_ROUTE, patch(update_profile))
+        .route(paths::ME_ROUTE, get(get_me).patch(update_profile))
+        .route(doc_paths::TOKENS_ROUTE, post(create_token).get(list_tokens))
+        .route(doc_paths::TOKEN_ROUTE, delete(revoke_token))
+        .route(doc_paths::OPENAPI_ROUTE, get(openapi_document))
         .route(paths::ACCEPT_INVITATION_ROUTE, post(accept_invitation))
         .route(paths::PERSON_ROLE_ROUTE, put(put_person_role))
         .route(paths::PERSON_DEACTIVATED_ROUTE, put(put_person_deactivated))
@@ -142,7 +160,10 @@ pub fn router(state: AppState) -> Router {
         .route(paths::PERSON_ROUTE, get(get_person))
         .route(paths::SAVED_ROUTE, get(list_saved))
         .route(paths::MESSAGE_SAVED_ROUTE, put(put_message_saved))
-        .route(paths::OPEN_CONVERSATION_ROUTE, post(open_conversation))
+        .route(
+            paths::OPEN_CONVERSATION_ROUTE,
+            get(list_member_conversations).post(open_conversation),
+        )
         .route(paths::CONVERSATION_ROUTE, patch(update_conversation))
         .route(paths::JOIN_ROUTE, post(join_channel))
         .route(paths::LEAVE_ROUTE, post(leave_channel))
@@ -161,11 +182,62 @@ pub fn router(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ));
-    api.merge(files)
+    api.merge(docs)
+        .merge(files)
         // Outermost: every request is logged by its matched route pattern (never its path, which
         // can hold a webhook secret), given an id, and a panic in a handler becomes a logged 500.
         .layer(axum::middleware::from_fn(logging::log_requests))
         .with_state(state)
+}
+
+async fn get_me(
+    State(state): State<AppState>,
+    Auth(principal): Auth,
+) -> Result<Json<ProfileResponse>, AppError> {
+    let user = accounts::load_user(&state.pool, principal.user_id).await?;
+    Ok(Json(ProfileResponse { user }))
+}
+
+async fn list_member_conversations(
+    State(state): State<AppState>,
+    Auth(principal): Auth,
+    ApiPath(workspace_id): ApiPath<WorkspaceId>,
+) -> Result<Json<ConversationListResponse>, AppError> {
+    conversations::list_member(&state.pool, principal.user_id, workspace_id)
+        .await
+        .map(Json)
+}
+
+/// Making a token needs a session: the route is not in the token table, so a token is refused
+/// before it gets here.
+async fn create_token(
+    State(state): State<AppState>,
+    Auth(principal): Auth,
+    ApiJson(request): ApiJson<CreateTokenRequest>,
+) -> Result<Json<CreateTokenResponse>, AppError> {
+    tokens::create(&state, principal.user_id, request)
+        .await
+        .map(Json)
+}
+
+async fn list_tokens(
+    State(state): State<AppState>,
+    Auth(principal): Auth,
+) -> Result<Json<TokenListResponse>, AppError> {
+    tokens::list(&state.pool, principal.user_id).await.map(Json)
+}
+
+async fn revoke_token(
+    State(state): State<AppState>,
+    Auth(principal): Auth,
+    ApiPath(id): ApiPath<lazy_domain::AccessTokenId>,
+) -> Result<StatusCode, AppError> {
+    tokens::revoke(&state.pool, principal.user_id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn openapi_document() -> Json<serde_json::Value> {
+    Json(openapi::document())
 }
 
 async fn unknown_route() -> AppError {
@@ -714,7 +786,15 @@ async fn download_attachment(
     ApiPath(attachment_id): ApiPath<AttachmentId>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    attachments::download(&state, principal.user_id, attachment_id, false, &headers).await
+    attachments::download(
+        &state,
+        principal.user_id,
+        attachment_id,
+        false,
+        principal.via_token,
+        &headers,
+    )
+    .await
 }
 
 async fn download_attachment_thumbnail(
@@ -723,7 +803,15 @@ async fn download_attachment_thumbnail(
     ApiPath(attachment_id): ApiPath<AttachmentId>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    attachments::download(&state, principal.user_id, attachment_id, true, &headers).await
+    attachments::download(
+        &state,
+        principal.user_id,
+        attachment_id,
+        true,
+        principal.via_token,
+        &headers,
+    )
+    .await
 }
 
 async fn replies(
@@ -1012,25 +1100,56 @@ async fn realtime_upgrade(
         })
 }
 
-/// The authenticated caller, from `Authorization: Bearer <token>`.
+/// The authenticated caller, from `Authorization: Bearer <token>`: a session token, or an access
+/// token (D31) on a route that the token table lets it reach with one of its scopes.
 pub struct Auth(pub Principal);
+
+/// The text of the `Authorization: Bearer` credential, if there is one.
+pub(crate) fn bearer(headers: &HeaderMap) -> Result<&str, AppError> {
+    let header = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(AppError::unauthenticated)?;
+    let (scheme, token) = header
+        .split_once(' ')
+        .ok_or_else(AppError::unauthenticated)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err(AppError::unauthenticated());
+    }
+    Ok(token.trim())
+}
 
 impl FromRequestParts<AppState> for Auth {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
-        let header = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(AppError::unauthenticated)?;
-        let (scheme, token) = header
-            .split_once(' ')
-            .ok_or_else(AppError::unauthenticated)?;
-        if !scheme.eq_ignore_ascii_case("bearer") {
-            return Err(AppError::unauthenticated());
-        }
-        let principal = accounts::authenticate(&state.pool, token.trim()).await?;
+        let token = bearer(&parts.headers)?;
+        let principal = if crate::crypto::looks_like_access_token(token) {
+            // Who the token is comes first (an unknown token is `unauthenticated` wherever it is
+            // used); then whether this route is one tokens may reach, and whether this token
+            // holds its scope. Default deny: a route not in the table refuses every token.
+            let auth = tokens::authenticate(&state.pool, token).await?;
+            let matched = parts
+                .extensions
+                .get::<MatchedPath>()
+                .map(MatchedPath::as_str);
+            let scope = matched
+                .and_then(|path| token_routes::required_scope(&parts.method, path))
+                .ok_or_else(|| AppError::forbidden(TOKEN_REFUSED))?;
+            if !auth.has(scope) {
+                return Err(AppError::forbidden(format!(
+                    "this token does not have the {} scope",
+                    scope.as_str()
+                )));
+            }
+            Principal {
+                user_id: auth.user_id,
+                session_id: auth.token_id.as_uuid(),
+                via_token: true,
+            }
+        } else {
+            accounts::authenticate(&state.pool, token).await?
+        };
         // For the request line: who made the request (their id, nothing else).
         if let Some(info) = parts.extensions.get::<logging::RequestInfo>() {
             info.note_user(principal.user_id);
@@ -1038,6 +1157,9 @@ impl FromRequestParts<AppState> for Auth {
         Ok(Auth(principal))
     }
 }
+
+/// What an access token is told on a route it cannot reach. The tests recognise a refusal by it.
+pub const TOKEN_REFUSED: &str = "an access token cannot be used for this route";
 
 /// `Json` that reports failures as an [`ApiError`](lazy_protocol::ApiError) body.
 pub struct ApiJson<T>(pub T);

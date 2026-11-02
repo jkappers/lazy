@@ -119,6 +119,8 @@ pub enum Effect {
     },
     /// Nothing is waiting for the search in flight any more.
     CancelSearch,
+    /// Docs work (D30): a request, or the journal.
+    Docs(crate::docs::DocsEffect),
     /// Save the recent searches, replacing the previous save. The runtime may debounce.
     PersistRecentSearches(Vec<String>),
     /// Upload a custom emoji's image with a single `PUT` (the core repeats it after an unknown
